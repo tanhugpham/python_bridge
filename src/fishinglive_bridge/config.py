@@ -59,11 +59,15 @@ class Settings:
 def load_settings(env_file: Path | None = None) -> Settings:
     if env_file is not None:
         load_dotenv(env_file)
+    # Render terminates HTTPS at its proxy and forwards HTTP to this service.
+    # Local and other deployments continue to require TLS for public binds.
+    on_render = os.environ.get("RENDER", "").strip().lower() == "true"
     mode = os.environ.get("BRIDGE_MODE", "mock").strip().lower()
     if mode not in {"mock", "live"}:
         raise RuntimeError("BRIDGE_MODE must be mock or live")
-    host = os.environ.get("BRIDGE_HOST", "127.0.0.1").strip() or "127.0.0.1"
-    port = int(os.environ.get("BRIDGE_PORT", "8787"))
+    default_host = "0.0.0.0" if on_render else "127.0.0.1"
+    host = os.environ.get("BRIDGE_HOST", default_host).strip() or default_host
+    port = int(os.environ.get("BRIDGE_PORT") or (os.environ.get("PORT", "10000") if on_render else "8787"))
     ssl_cert = os.environ.get("BRIDGE_SSL_CERT", "").strip()
     ssl_key = os.environ.get("BRIDGE_SSL_KEY", "").strip()
     settings = Settings(
@@ -85,6 +89,6 @@ def load_settings(env_file: Path | None = None) -> Settings:
         raise RuntimeError("TIKTOK_TARGET_IDC is required when a session is set")
     if (settings.ssl_cert or settings.ssl_key) and not (settings.ssl_cert and settings.ssl_key):
         raise RuntimeError("BRIDGE_SSL_CERT and BRIDGE_SSL_KEY must be set together")
-    if not settings.loopback and not settings.ssl_cert:
+    if not settings.loopback and not settings.ssl_cert and not on_render:
         raise RuntimeError("a public bind requires TLS certificate files")
     return settings
