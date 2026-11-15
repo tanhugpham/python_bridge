@@ -1,0 +1,107 @@
+{
+  "page": 200,
+  "session": 200,
+  "csrfPresent": true,
+  "htmlMarkers": {
+    "Bắt đầu phiên test": false,
+    "0 / 500": false,
+    "ĐÃ MỞ KHÓA": false,
+    "UNCONFIGURED": false,
+    "TEST OVERRIDE": false,
+    "Xóa nhật ký": false,
+    "Xuất nhật ký": false
+  },
+  "dashboardBefore": {
+    "roblox": "ROBLOX DISCONNECTED",
+    "https": "KHÔNG CHẠY",
+    "mock": true,
+    "sessionOn": true
+  },
+  "basicStatus": 200,
+  "basicPassed": true,
+  "scenarios": [
+    {
+      "id": 1,
+      "ok": true,
+      "scope": "bridge"
+    },
+    {
+      "id": 2,
+      "ok": true,
+      "scope": "bridge"
+    },
+    {
+      "id": 3,
+      "ok": true,
+      "scope": "roblox_not_tested"
+    },
+    {
+      "id": 4,
+      "ok": true,
+      "scope": "bridge"
+    },
+    {
+      "id": 5,
+      "ok": true,
+      "scope": "bridge"
+    },
+    {
+      "id": 6,
+      "ok": true,
+      "scope": "bridge"
+    },
+    {
+      "id": 7,
+      "ok": true,
+      "scope": "bridge"
+    },
+    {
+      "id": 8,
+      "ok": true,
+      "approvedForLive": false,
+      "scope": "bridge_mock"
+    },
+    {
+      "id": 9,
+      "ok": true,
+      "scope": "bridge"
+    },
+    {
+      "id": 10,
+      "ok": true,
+      "humanoids": 0,
+      "scope": "logical"
+    },
+    {
+      "id": 11,
+      "ok": true,
+      "scope": "dedupe"
+    },
+    {
+      "id": 12,
+      "ok": true,
+      "scope": "mock_only"
+    }
+  ],
+  "humanoidsCreated": 0,
+  "appliedOnRoblox": false,
+  "unconfigured": "UNCONFIGURED",
+  "dashboardAfter": {
+    "roblox": "ROBLOX DISCONNECTED",
+    "connected": false,
+    "acks": 0,
+    "depth": 123,
+    "viewers": 111,
+    "rss": 48680960,
+    "cpu": null
+  },
+  "metricsRoblox": {
+    "fps": null,
+    "memory": null,
+    "instances": null,
+    "humanoids": null,
+    "activeRigs": null,
+    "cameraQueue": null,
+    "note": "Chưa kết nối telemetry Roblox"
+  }
+}

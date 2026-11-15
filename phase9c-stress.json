@@ -1,0 +1,16 @@
+{
+  "joins": {
+    "http": 200,
+    "created": 160
+  },
+  "likes": {},
+  "comments": {},
+  "gifts": {},
+  "duplicate": {},
+  "burst": {},
+  "reset": null,
+  "maxDepth": 60,
+  "healthFails": 0,
+  "pythonMbMax": 0.0,
+  "stage": "joins-160"
+}

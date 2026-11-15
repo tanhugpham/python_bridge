@@ -1,0 +1,250 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>FISHINGLIVE — Bảng điều khiển host</title>
+<link rel="stylesheet" href="/host/styles.css">
+</head>
+<body>
+<div class="app">
+  <aside class="side">
+    <div class="brand">
+      <strong>FISHINGLIVE</strong>
+      <span>Host Controller</span>
+    </div>
+    <nav id="nav">
+      <button type="button" data-panel="dashboard" class="on">Tổng quan</button>
+      <button type="button" data-panel="viewers">Người xem</button>
+      <button type="button" data-panel="likes">Tim</button>
+      <button type="button" data-panel="comments">Bình luận</button>
+      <button type="button" data-panel="gifts">Quà</button>
+      <button type="button" data-panel="baits">Mồi</button>
+      <button type="button" data-panel="fishing">Câu cá</button>
+      <button type="button" data-panel="camera">Camera</button>
+      <button type="button" data-panel="leaderboard">Bảng xếp hạng</button>
+      <button type="button" data-panel="performance">Hiệu năng</button>
+      <button type="button" data-panel="logs">Nhật ký</button>
+      <button type="button" data-panel="settings">Cài đặt</button>
+    </nav>
+  </aside>
+  <div class="main">
+    <header>
+      <div>
+        <h1 id="title">Tổng quan</h1>
+        <p id="subtitle">Giả lập TikTok LIVE qua Python Bridge. Không kết nối TikTok thật.</p>
+      </div>
+      <div class="pills" id="pills"></div>
+    </header>
+    <p class="banner" id="roblox-warn" hidden>Roblox bridge đang tắt. Sự kiện dừng ở Python. Trang này không bật HTTP.</p>
+    <section id="dashboard" class="panel on">
+      <div class="cards" id="cards"></div>
+      <p class="note" id="projection"></p>
+    </section>
+    <section id="viewers" class="panel">
+      <div class="card">
+        <h2>Thêm người xem</h2>
+        <div class="row">
+          <input id="viewer-name" placeholder="Username">
+          <input id="viewer-id" placeholder="User ID">
+          <input id="viewer-avatar" placeholder="Avatar URL">
+          <input id="viewer-likes" type="number" min="0" max="10000" value="0" placeholder="Likes">
+          <input id="viewer-points" type="number" min="0" value="0" placeholder="Điểm mock">
+          <button type="button" class="primary" id="add-viewer">Thêm người</button>
+          <button type="button" id="remove-viewer">Gỡ người</button>
+          <button type="button" id="reset-viewer">Đặt lại người</button>
+        </div>
+        <div class="row" id="viewer-counts"></div>
+        <p class="note">Mỗi người một userId mock riêng. Tên mock_ không trùng. Sự kiện join đi vào hàng đợi bridge.</p>
+      </div>
+      <div class="card">
+        <div class="row">
+          <input id="viewer-search" placeholder="Tìm username hoặc userId">
+          <button type="button" id="viewer-find">Tìm</button>
+          <button type="button" id="viewer-prev">Trước</button>
+          <button type="button" id="viewer-next">Sau</button>
+          <span id="viewer-page" class="muted"></span>
+        </div>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>Username</th><th>UserId</th><th>Avatar</th><th>Likes</th><th>Mở khóa</th><th>Đã đăng ký</th><th>Điểm mock</th><th>Điểm Roblox</th><th>Cá lớn nhất</th><th>Hoạt động</th>
+              </tr>
+            </thead>
+            <tbody id="viewer-body"></tbody>
+          </table>
+        </div>
+      </div>
+    </section>
+    <section id="likes" class="panel">
+      <div class="card">
+        <h2>Gửi tim</h2>
+        <p class="note">Một sự kiện like mang theo số lượng. Không tạo NPC cho từng tim. Trùng eventId không cộng lại.</p>
+        <p id="like-progress">0 / 500</p>
+        <p id="like-unlock"></p>
+        <div class="row" id="like-buttons"></div>
+        <div class="row">
+          <input id="like-count" type="number" min="1" max="10000" value="25" placeholder="Số tim">
+          <button type="button" class="primary" id="like-custom">Gửi số tim này</button>
+          <button type="button" id="like-dup">Gửi lại đúng eventId vừa rồi</button>
+        </div>
+        <p class="feedback" id="like-feedback"></p>
+      </div>
+    </section>
+    <section id="comments" class="panel">
+      <div class="card">
+        <h2>Bình luận</h2>
+        <div class="row">
+          <input id="comment-text" placeholder="Nội dung bình luận">
+          <button type="button" class="primary" id="comment-send">Gửi</button>
+        </div>
+        <div class="row" id="comment-quick"></div>
+        <p class="feedback" id="comment-feedback"></p>
+      </div>
+    </section>
+    <section id="gifts" class="panel">
+      <div class="card">
+        <h2>Quà giả lập</h2>
+        <p class="note">Xu ở đây là mock. Mỗi nút một quyền lợi. Tranh cá chỉ Rose 20 xu, camera chỉ Galaxy 30 xu, mồi chỉ 5 cấp. Thiếu mapping thì hiện UNCONFIGURED.</p>
+        <div id="gift-groups"></div>
+        <h3>Quà tùy chỉnh</h3>
+        <div class="row">
+          <input id="gift-id" placeholder="giftId" value="GIFT_CUSTOM">
+          <input id="gift-name" placeholder="giftName" value="Custom">
+          <input id="gift-coins" type="number" min="0" value="20" placeholder="coinValue">
+          <input id="gift-repeat" type="number" min="1" max="20" value="1" placeholder="repeatCount">
+          <select id="gift-purpose">
+            <option value="normal">Thông thường</option>
+            <option value="steal">Tranh cá</option>
+            <option value="camera">Camera</option>
+            <option value="bait">Đổi mồi</option>
+          </select>
+          <button type="button" class="gold" id="gift-send">Gửi quà</button>
+        </div>
+        <p class="feedback" id="gift-feedback"></p>
+      </div>
+    </section>
+    <section id="baits" class="panel">
+      <div class="card">
+        <h2>Năm cấp mồi</h2>
+        <p class="note" id="bait-note"></p>
+        <div class="bait-grid" id="bait-grid"></div>
+      </div>
+    </section>
+    <section id="fishing" class="panel">
+      <div class="card">
+        <h2>Điều khiển câu</h2>
+        <div class="row">
+          <button type="button" class="primary" id="fish-register">Bắt đầu câu</button>
+          <button type="button" id="fish-giat">Giật</button>
+          <button type="button" id="fish-10">10 PullRequest</button>
+          <button type="button" id="fish-100">100 PullRequest</button>
+        </div>
+        <div class="row" id="force-row"></div>
+        <p class="note">TEST OVERRIDES. Ép kết quả chỉ khi MOCK MODE. Không đổi xác suất LIVE.</p>
+        <p class="feedback" id="fish-feedback"></p>
+      </div>
+      <div class="card">
+        <h2>Khoảnh khắc giật 20 giây</h2>
+        <div class="stats" id="struggle-stats"></div>
+        <div class="row">
+          <button type="button" id="struggle-start">StartShowcase</button>
+          <button type="button" id="struggle-support">Comment hỗ trợ</button>
+          <button type="button" id="struggle-steal">Quà tranh cá</button>
+          <button type="button" id="struggle-win">ForceStruggleSuccess</button>
+          <button type="button" id="struggle-lose">ForceStruggleFailure</button>
+        </div>
+      </div>
+      <div class="card">
+        <h2>Hàng kết quả</h2>
+        <p class="note" id="result-note"></p>
+        <p>Thắng: <b id="result-wins">Chưa có dữ liệu</b> · Trượt: <b id="result-misses">Chưa có dữ liệu</b></p>
+      </div>
+    </section>
+    <section id="camera" class="panel">
+      <div class="card">
+        <h2>CameraDirector</h2>
+        <p class="note">Lấy nét người xem gửi /vitri vào hàng hiện có. Camera chính không có sự kiện TikTok nên chỉ ghi nhận. Trang không cắt showcase.</p>
+        <div class="row" id="camera-row"></div>
+        <ul class="rules">
+          <li>Giật cá 20 giây</li>
+          <li>Cá tuột 5 giây</li>
+          <li>/vitri 5 giây, cooldown 300 giây</li>
+          <li>Gift camera 5 giây, cooldown 30 giây</li>
+          <li>Lấy nét vị trí 20 giây mỗi phút</li>
+          <li>TOP 10 trong 20 giây</li>
+        </ul>
+        <p class="feedback" id="camera-feedback"></p>
+      </div>
+    </section>
+    <section id="leaderboard" class="panel">
+      <div class="card">
+        <h2>TOP 10 ngư dân</h2>
+        <div class="row">
+          <button type="button" class="primary" id="board-refresh">Làm mới</button>
+          <button type="button" id="board-camera">Xem camera bảng</button>
+          <button type="button" id="board-reset">Xóa điểm mock</button>
+        </div>
+        <p class="note" id="board-note"></p>
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th>#</th><th>Avatar</th><th>Username</th><th>Điểm</th><th>Cá lớn nhất</th></tr></thead>
+            <tbody id="board-body"></tbody>
+          </table>
+        </div>
+      </div>
+    </section>
+    <section id="performance" class="panel">
+      <div class="cards" id="perf-cards"></div>
+      <p class="note" id="perf-note"></p>
+    </section>
+    <section id="logs" class="panel">
+      <div class="card">
+        <h2>Nhật ký sự kiện</h2>
+        <div class="row">
+          <button type="button" id="log-clear">Xóa nhật ký</button>
+          <button type="button" id="log-export">Xuất nhật ký</button>
+        </div>
+        <p class="note">SENT là trạng thái trình duyệt. QUEUED, ACCEPTED_BY_BRIDGE, PULLED_BY_ROBLOX, ACKNOWLEDGED và FAILED là trạng thái bridge đã quan sát. HTTP 200 không phải ACK.</p>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>Giờ</th><th>Username</th><th>Loại</th><th>EventId</th><th>Trạng thái</th><th>Bằng chứng</th><th>Tóm tắt</th>
+              </tr>
+            </thead>
+            <tbody id="log-body"></tbody>
+          </table>
+        </div>
+      </div>
+    </section>
+    <section id="settings" class="panel">
+      <div class="card">
+        <h2>Phiên và bài test</h2>
+        <div class="row">
+          <button type="button" class="primary" id="session-start">Bắt đầu phiên test</button>
+          <button type="button" class="danger" id="session-stop">Dừng phiên test</button>
+          <button type="button" class="danger" id="reset-session">Xóa dữ liệu mock</button>
+          <button type="button" id="send-test-event">Gửi sự kiện test</button>
+          <button type="button" class="gold" id="run-basic">Chạy test cơ bản</button>
+          <button type="button" class="gold" id="run-stress">Chạy test tải</button>
+        </div>
+        <div class="row" id="stress-row"></div>
+        <button type="button" class="danger" id="stress-stop">Dừng bài đang chạy</button>
+        <p class="feedback" id="stress-feedback"></p>
+        <ul class="rules">
+          <li>Trang này chỉ mở ở 127.0.0.1.</li>
+          <li>Không đưa bảng này lên Cloudflare Tunnel.</li>
+          <li>Khóa ingest và khóa read không nằm trong trình duyệt.</li>
+          <li>HTTP Requests của Roblox không được bật từ trang này.</li>
+          <li>Không publish và không nối TikTok thật.</li>
+        </ul>
+      </div>
+    </section>
+    <p class="toast" id="toast"></p>
+  </div>
+</div>
+<script src="/host/app.js"></script>
+</body>
+</html>

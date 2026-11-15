@@ -1,0 +1,103 @@
+:root {
+  --bg: #07161c;
+  --side: #0b2028;
+  --card: #102a33;
+  --line: #1d4d57;
+  --text: #e7f6f2;
+  --muted: #8eada8;
+  --teal: #3dcec0;
+  --teal-deep: #14756c;
+  --gold: #e2b657;
+  --red: #e25b5b;
+  --green: #3dbe7a;
+  --ink: #062027;
+}
+* { box-sizing: border-box; }
+html, body { margin: 0; background: var(--bg); color: var(--text); }
+body { font: 14px/1.45 "Segoe UI", system-ui, sans-serif; }
+button, input, select {
+  font: inherit;
+  color: var(--text);
+  background: var(--ink);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 8px 10px;
+}
+button { cursor: pointer; }
+button:hover { border-color: var(--teal); }
+button:disabled { opacity: 0.45; cursor: default; }
+button.primary { background: var(--teal-deep); border-color: var(--teal); }
+button.gold { background: #5c4816; border-color: var(--gold); color: var(--gold); }
+button.danger { background: #5a2424; border-color: var(--red); color: #ffd0d0; }
+button.on { border-color: var(--teal); color: var(--teal); }
+.app { display: grid; grid-template-columns: 220px 1fr; min-height: 100vh; }
+.side { background: var(--side); border-right: 1px solid var(--line); padding: 16px 12px; }
+.brand strong { display: block; letter-spacing: 0.08em; color: var(--teal); }
+.brand span { color: var(--muted); font-size: 12px; }
+nav { display: grid; gap: 4px; margin-top: 18px; }
+nav button { text-align: left; background: transparent; }
+.main { padding: 16px 18px 40px; }
+header { display: flex; justify-content: space-between; gap: 12px; align-items: flex-start; margin-bottom: 14px; }
+.banner { margin: 0 0 12px; padding: 10px 12px; border: 1px solid #8a6230; color: var(--gold); background: #2a2112; border-radius: 8px; }
+@media (max-width: 800px) {
+  .app { grid-template-columns: 1fr; }
+  .side { border-right: 0; border-bottom: 1px solid var(--line); }
+  nav { grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); }
+}
+h1 { margin: 0; font-size: 22px; }
+h2, h3 { margin: 0 0 10px; }
+header p, .note, .muted { color: var(--muted); }
+.pills, .row, .cards, .bait-grid { display: flex; flex-wrap: wrap; gap: 8px; }
+.pill {
+  border-radius: 999px;
+  padding: 6px 10px;
+  border: 1px solid var(--line);
+  background: #0c242c;
+  font-size: 12px;
+  font-weight: 700;
+}
+.pill.ok { color: var(--green); border-color: var(--green); }
+.pill.bad { color: var(--red); border-color: var(--red); }
+.pill.warn { color: var(--gold); border-color: var(--gold); }
+.panel { display: none; gap: 12px; }
+.panel.on { display: grid; }
+.card, .stat {
+  background: var(--card);
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  padding: 12px;
+}
+.cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(160px, 1fr)); }
+.stat b { display: block; font-size: 18px; margin-top: 4px; }
+.stat span { color: var(--muted); font-size: 12px; }
+.stat.bad b { color: var(--red); }
+.stat.ok b { color: var(--green); }
+.stat.gold b { color: var(--gold); }
+.table-wrap { overflow: auto; max-height: 460px; margin-top: 10px; }
+table { width: 100%; border-collapse: collapse; font-size: 13px; }
+th, td { text-align: left; padding: 7px 8px; border-bottom: 1px solid var(--line); white-space: nowrap; }
+th { color: var(--gold); font-weight: 650; position: sticky; top: 0; background: #12313b; }
+tr.pick { background: #16424a; }
+.bait-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(210px, 1fr)); }
+.bait { min-height: 150px; }
+.swatch { width: 18px; height: 18px; border-radius: 50%; display: inline-block; vertical-align: middle; margin-right: 6px; }
+.rules { margin: 8px 0 0; padding-left: 18px; color: var(--muted); }
+.feedback { min-height: 1.2em; }
+.toast:empty { display: none; }
+.toast {
+  position: sticky;
+  bottom: 8px;
+  margin: 12px 0 0;
+  padding: 8px 10px;
+  border-radius: 8px;
+  background: #0c242c;
+  border: 1px solid var(--line);
+}
+.ok-text { color: var(--green); }
+.bad-text { color: var(--red); }
+.gold-text { color: var(--gold); }
+@media (max-width: 900px) {
+  .app { grid-template-columns: 1fr; }
+  .side { border-right: 0; border-bottom: 1px solid var(--line); }
+  nav { grid-template-columns: repeat(auto-fill, minmax(120px, 1fr)); }
+}
