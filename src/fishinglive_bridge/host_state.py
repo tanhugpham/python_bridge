@@ -3,17 +3,23 @@
 from __future__ import annotations
 
 import ctypes
+import json
 import secrets
 import threading
 import time
+import urllib.error
+import urllib.request
 from collections import deque
+from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
 
-from fishinglive_bridge.config import Settings
+from fishinglive_bridge.config import USERNAME_CHARS, Settings, normalize_username, read_live_settings
 from fishinglive_bridge.mirror import MIRRORED_STATUSES
 from fishinglive_bridge.queue_store import EventQueue
+from fishinglive_bridge.remote_probe import RemoteProbe
 from fishinglive_bridge.schema import parse_event
+from fishinglive_bridge.telemetry import TelemetryStore
 
 JOIN_TEXT = {"cau", "câu", "/cau", "/câu"}
 PULL_TEXT = {"/giat", "/giật"}
@@ -62,8 +68,10 @@ STRESS_KINDS = {
     "roblox_reconnect",
 }
 AUTO_DEMO_VIEWERS = 10
+AUTO_DEMO_SIZES = (10, 100, 500)
 AUTO_DEMO_PACE = 0.75
 AUTO_DEMO_REST = 3.0
+AUTO_DEMO_JOIN_PACE = 0.01
 AUTO_DEMO_LIKE_BURST = 100
 AUTO_DEMO_CHAT = (
     "xin chào cả nhà",
@@ -212,10 +220,14 @@ def _cpu_seconds() -> float | None:
 
 
 class HostState:
-    def __init__(self, queue: EventQueue, settings: Settings, mirror: Any = None) -> None:
+    def __init__(self, queue: EventQueue, settings: Settings, mirror: Any = None, telemetry: TelemetryStore | None = None) -> None:
         self.queue = queue
         self.settings = settings
         self.mirror = mirror
+        self.telemetry = telemetry if telemetry is not None else TelemetryStore()
+        self.probe = RemoteProbe(settings.mirror_url, settings.mirror_key) if settings.mirror_url else None
+        self.settings_path = Path(settings.live_settings_path)
+        self.report: dict[str, Any] | None = None
         self.lock = threading.Lock()
         self.viewers: dict[str, dict[str, Any]] = {}
         self.by_name: dict[str, str] = {}
@@ -239,6 +251,8 @@ class HostState:
             "step": "",
             "sent": 0,
             "wave": 0,
+            "requested": AUTO_DEMO_VIEWERS,
+            "joinPending": 0,
             "viewers": [],
         }
         self.session_on = True
@@ -307,6 +321,45 @@ class HostState:
         likes = sum(int(row["likes"]) for row in viewers)
         gifts = sum(int(row["gifts"]) for row in viewers)
         label = self.roblox_label(state)
+        remote = self.probe.snapshot() if self.probe is not None else {
+            "enabled": False,
+            "url": "",
+            "ok": False,
+            "status": "OFF",
+            "checkedAt": None,
+            "ageSeconds": None,
+            "latencyMs": None,
+            "version": "",
+            "sessionId": "",
+            "resetEpoch": None,
+            "depth": None,
+            "ackCursor": None,
+            "durable": None,
+            "telemetry": None,
+            "telemetryAge": None,
+            "telemetryFresh": False,
+            "error": "",
+            "note": "Chưa cấu hình BRIDGE_MIRROR_URL. Trang chỉ thấy bridge cục bộ.",
+        }
+        local = self.telemetry.get()
+        if isinstance(remote.get("telemetry"), dict):
+            telemetry = remote["telemetry"]
+            telemetry_source = "render"
+            telemetry_age = remote.get("telemetryAge")
+            telemetry_fresh = bool(remote.get("telemetryFresh"))
+            telemetry_note = "Telemetry Roblox nhận qua ACK thật ở bridge công khai."
+        elif isinstance(local.get("telemetry"), dict):
+            telemetry = local["telemetry"]
+            telemetry_source = "local"
+            telemetry_age = local.get("ageSeconds")
+            telemetry_fresh = bool(local.get("fresh"))
+            telemetry_note = "Telemetry Roblox nhận qua ACK thật ở bridge cục bộ."
+        else:
+            telemetry = None
+            telemetry_source = ""
+            telemetry_age = None
+            telemetry_fresh = False
+            telemetry_note = "Chưa có telemetry Roblox. FPS/RAM chỉ có sau khi Roblox ACK batch."
         return {
             "bridge": {
                 "ok": True,
@@ -332,9 +385,13 @@ class HostState:
                 "lastAckAt": state["lastAckAt"],
                 "pulls": state["pulls"],
                 "acks": state["acks"],
-                "telemetry": None,
-                "telemetryNote": "Chưa kết nối telemetry Roblox",
+                "telemetry": telemetry,
+                "telemetrySource": telemetry_source,
+                "telemetryAgeSeconds": telemetry_age,
+                "telemetryFresh": telemetry_fresh,
+                "telemetryNote": telemetry_note,
             },
+            "render": remote,
             "mockMode": not self.settings.live,
             "viewers": len(viewers),
             "activeNpc": None,
@@ -347,6 +404,7 @@ class HostState:
             "batchLatencyMs": state["batchLatencyMs"],
             "stress": stress,
             "autoDemo": demo,
+            "report": self.report,
             "mirror": self.mirror_status(),
             "sessionOn": session_on,
             "httpsTunnel": {
@@ -442,6 +500,7 @@ class HostState:
 
     def metrics(self) -> dict[str, Any]:
         board = self.dashboard()
+        telemetry = board["roblox"]["telemetry"] or {}
         return {
             "process": board["process"],
             "queue": {
@@ -453,15 +512,20 @@ class HostState:
                 "batchLatencyMs": board["batchLatencyMs"],
             },
             "roblox": {
-                "fps": None,
-                "memory": None,
-                "instances": None,
+                "fps": telemetry.get("fps"),
+                "physicsFps": telemetry.get("physicsFps"),
+                "memory": telemetry.get("ramMb"),
+                "players": telemetry.get("players"),
+                "instances": telemetry.get("instances"),
                 "humanoids": None,
                 "activeRigs": None,
                 "cameraQueue": None,
-                "note": "Chưa kết nối telemetry Roblox",
+                "source": board["roblox"]["telemetrySource"],
+                "ageSeconds": board["roblox"]["telemetryAgeSeconds"],
+                "note": board["roblox"]["telemetryNote"],
             },
             "mirror": board["mirror"],
+            "render": board["render"],
         }
 
     def reset_mock(self) -> dict[str, Any]:
@@ -497,8 +561,20 @@ class HostState:
             "reset_leaderboard",
             "preview_bait",
             "reset_viewer",
+            "save_live_settings",
+            "remote_refresh",
+            "live_switch_tiktok",
+            "live_tiktok_status",
         }:
             return self._fail("paused", "Phiên test đã dừng. Trang không bật HTTP Roblox.")
+        if action == "save_live_settings":
+            return self.save_live_settings(body)
+        if action == "remote_refresh":
+            return self.remote_refresh()
+        if action == "live_switch_tiktok":
+            return self.switch_remote_tiktok(body)
+        if action == "live_tiktok_status":
+            return self.remote_tiktok_status()
         if action == "reset_viewer":
             return self.reset_viewer(body.get("username"))
         if action == "basic_test":
@@ -512,8 +588,10 @@ class HostState:
             return self.start_stress(str(kind), pace if pace is not None else 0.025)
         if self.settings.live and action not in {"refresh"}:
             return self._blocked()
+        if action == "run_test_suite":
+            return self.run_test_suite()
         if action == "auto_demo_start":
-            return self.start_auto_demo()
+            return self.start_auto_demo(body.get("viewers"))
         if action == "add_viewer":
             return self.add_viewer(
                 body.get("username"),
@@ -531,6 +609,10 @@ class HostState:
             return self.send_like(body.get("username"), body.get("count"), body.get("eventId"))
         if action == "comment":
             return self.send_comment(body.get("username"), body.get("text"), body.get("eventId"))
+        if action == "follow":
+            return self.send_follow(body.get("username"))
+        if action == "seed_fishers":
+            return self.seed_fishers(body.get("count", 10))
         if action == "gift":
             return self.send_gift(body)
         if action == "register_fishing":
@@ -676,6 +758,432 @@ class HostState:
         if result.get("bridgeStatus") == "QUEUED":
             result["detail"] = "Đã gửi một comment thử. Không phải lệnh câu. Roblox chưa ACK."
         return result
+
+    def send_follow(self, username: Any) -> dict[str, Any]:
+        row = self._require(username)
+        if isinstance(row, dict) and row.get("ok") is False:
+            return row
+        event = self._event("follow", row["userId"], row["username"], {}, None)
+        result = self._publish(event)
+        result["viewer"] = self._public_viewer(row["userId"])
+        if result["bridgeStatus"] in {"QUEUED", "ACCEPTED_BY_BRIDGE"}:
+            result["detail"] = "Bridge đã xếp follow. Roblox chỉ nhận khi kéo batch; chưa có ACK."
+        return result
+
+    def seed_fishers(self, count: Any) -> dict[str, Any]:
+        if isinstance(count, bool) or not isinstance(count, int) or count < 1 or count > 10:
+            return self._fail("invalid", "Số ngư dân phải từ 1 đến 10.")
+        created: list[str] = []
+        last: dict[str, Any] = {}
+        for _ in range(count):
+            if self.queue.status()["depth"] + 3 > self.queue.capacity:
+                break
+            name = self._alloc_name()
+            added = self.add_viewer(name)
+            if added.get("bridgeStatus") != "QUEUED":
+                last = added
+                break
+            self.send_like(name, 500, None)
+            joined = self.send_comment(name, "câu", None)
+            last = joined
+            if joined.get("bridgeStatus") != "QUEUED":
+                break
+            created.append(name)
+        if not created:
+            return last if last.get("ok") is False else self._fail("busy", "Hàng đợi gần đầy. Không tạo thêm ngư dân.")
+        return self._result(
+            "QUEUED",
+            "CHƯA KÉO",
+            None,
+            "",
+            f"Đã tạo {len(created)} ngư dân mock: 500 like và câu cho mỗi người. Roblox chưa ACK.",
+            extra={"fishers": created, "created": len(created), "appliedOnRoblox": False},
+        )
+
+    def live_settings(self) -> dict[str, Any]:
+        draft = read_live_settings(self.settings_path)
+        board = self.dashboard()
+        remote = board["render"]
+        if not remote.get("enabled"):
+            render_state = "OFF"
+            render_detail = "Chưa cấu hình BRIDGE_MIRROR_URL."
+        elif remote.get("ok"):
+            render_state = "OK"
+            render_detail = f"v{remote.get('version') or '?'} · queue {remote.get('depth')} · ACK {remote.get('ackCursor')} · {remote.get('latencyMs')} ms"
+        else:
+            render_state = "ERROR"
+            render_detail = "Không gọi được: " + (remote.get("error") or "unknown")
+        statuses = [
+            {"key": "bridge", "label": "Bridge cục bộ", "state": "OK", "detail": f"127.0.0.1:{self.settings.port} · {self.settings.mode}"},
+            {"key": "render", "label": "Bridge công khai (Render)", "state": render_state, "detail": render_detail},
+            {"key": "roblox", "label": "Roblox", "state": board["roblox"]["label"], "detail": board["roblox"]["telemetryNote"]},
+            {
+                "key": "tiktok",
+                "label": "TikTok",
+                "state": "LIVE" if self.settings.live else "MOCK",
+                "detail": "LIVE đang OFF. Trang này không mở kết nối TikTok." if not self.settings.live else "LIVE do biến môi trường bật, không phải trang này.",
+            },
+            {
+                "key": "http",
+                "label": "HTTP Roblox (HttpService)",
+                "state": "KHÔNG THẤY",
+                "detail": "Bridge không đọc được HttpEnabled của place. Bật trong Roblox Studio.",
+            },
+        ]
+        return {
+            "ok": True,
+            "mode": self.settings.mode,
+            "mockMode": not self.settings.live,
+            "tiktokUsername": self.settings.tiktok_username,
+            "bridgeUrl": self.settings.mirror_url,
+            "draft": draft,
+            "draftPath": str(self.settings_path),
+            "savedSettingsEnabled": False,
+            "liveAllowed": False,
+            "applyNote": "Bản nháp chỉ áp dụng khi khởi động bridge với BRIDGE_SAVED_SETTINGS=1. LIVE không bao giờ bật từ trang này.",
+            "statuses": statuses,
+        }
+
+    def save_live_settings(self, body: dict[str, Any]) -> dict[str, Any]:
+        # Only the explicit draft field counts: the host page always sends a
+        # selected viewer as "username", which must never leak into the draft.
+        raw_name = body.get("tiktokUsername") or self.settings.tiktok_username
+        username = raw_name.strip().lstrip("@").lower() if isinstance(raw_name, str) else ""
+        if username and (
+            len(username) < 2
+            or len(username) > 24
+            or not set(username) <= USERNAME_CHARS
+        ):
+            return self._fail("invalid", "TikTok username không hợp lệ (2-24 ký tự, chữ/số/._).")
+        mode = body.get("mode", "mock")
+        if mode not in {"mock", "live"}:
+            return self._fail("invalid", "Chế độ chỉ nhận MOCK hoặc LIVE.")
+        raw_url = body.get("bridgeUrl", "") or ""
+        bridge_url = raw_url.strip().rstrip("/") if isinstance(raw_url, str) else None
+        if bridge_url is None:
+            return self._fail("invalid", "Bridge URL không hợp lệ.")
+        if bridge_url and not (bridge_url.startswith("http://") or bridge_url.startswith("https://")):
+            return self._fail("invalid", "Bridge URL phải bắt đầu bằng http:// hoặc https://.")
+        if len(bridge_url) > 200:
+            return self._fail("invalid", "Bridge URL quá dài.")
+        draft = {
+            "tiktokUsername": username,
+            "mode": mode,
+            "bridgeUrl": bridge_url,
+            "updatedAt": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        }
+        try:
+            self.settings_path.parent.mkdir(parents=True, exist_ok=True)
+            temporary = self.settings_path.with_suffix(".tmp")
+            temporary.write_text(json.dumps(draft, ensure_ascii=False, indent=2), encoding="utf-8")
+            temporary.replace(self.settings_path)
+        except OSError as error:
+            return self._fail("io", f"Không ghi được file cài đặt: {type(error).__name__}")
+        warning = ""
+        if mode == "live":
+            warning = "LIVE vẫn OFF: trang này không mở kết nối TikTok và không đổi BRIDGE_MODE."
+        return self._result(
+            "ACCEPTED_BY_BRIDGE",
+            "NOT_DELIVERED",
+            None,
+            "",
+            "Đã lưu bản nháp Live Settings. " + warning,
+            extra={
+                "draft": draft,
+                "applied": False,
+                "liveBlocked": mode == "live",
+                "warning": warning,
+                "path": str(self.settings_path),
+            },
+        )
+
+    def remote_refresh(self) -> dict[str, Any]:
+        if self.probe is None:
+            render = self.dashboard()["render"]
+            return self._result(
+                "ACCEPTED_BY_BRIDGE",
+                "NOT_DELIVERED",
+                None,
+                "",
+                "Chưa cấu hình BRIDGE_MIRROR_URL nên không có bridge công khai để kiểm tra.",
+                extra={"render": render},
+            )
+        row = self.probe.refresh()
+        detail = "Đã kiểm tra bridge công khai." if row.get("ok") else "Không gọi được bridge công khai."
+        return self._result("ACCEPTED_BY_BRIDGE", "NOT_DELIVERED", None, "", detail, extra={"render": row})
+
+    def _public_call(self, method: str, path: str, payload: dict[str, Any] | None = None) -> tuple[int, dict[str, Any]]:
+        """Call the public bridge with the mirror ingest key. Session values never enter logs."""
+        if not self.settings.mirror_url:
+            return 0, {"detail": "no_mirror_url"}
+        url = self.settings.mirror_url.rstrip("/") + path
+        headers = {
+            "X-Bridge-Key": self.settings.mirror_key or self.settings.ingest_key,
+            "Accept": "application/json",
+        }
+        data = None
+        if payload is not None:
+            data = json.dumps(payload).encode("utf-8")
+            headers["Content-Type"] = "application/json"
+        request = urllib.request.Request(url, data=data, headers=headers, method=method)
+        try:
+            with urllib.request.urlopen(request, timeout=15) as response:
+                body = response.read(20_000).decode("utf-8", "replace")
+                parsed: dict[str, Any] = {}
+                try:
+                    value = json.loads(body) if body else {}
+                    parsed = value if isinstance(value, dict) else {}
+                except ValueError:
+                    parsed = {}
+                return int(response.status), parsed
+        except urllib.error.HTTPError as error:
+            parsed = {}
+            try:
+                body = error.read(20_000).decode("utf-8", "replace")
+                value = json.loads(body) if body else {}
+                parsed = value if isinstance(value, dict) else {}
+            except (ValueError, OSError):
+                parsed = {}
+            return int(error.code), parsed
+        except (urllib.error.URLError, OSError) as error:
+            return 0, {"detail": type(error).__name__}
+
+    def switch_remote_tiktok(self, body: dict[str, Any]) -> dict[str, Any]:
+        """Proxy an operator switch to the live Render bridge. No redeploy needed."""
+        username = normalize_username(body.get("tiktokUsername"))
+        if not username:
+            return self._fail("invalid", "TikTok username không hợp lệ (2-24 ký tự, chữ/số/._).")
+        session_id = body.get("sessionId", "")
+        target_idc = body.get("targetIdc", "")
+        if not isinstance(session_id, str) or not isinstance(target_idc, str):
+            return self._fail("invalid", "Session hoặc Target IDC không hợp lệ.")
+        session_id = session_id.strip()
+        target_idc = target_idc.strip()
+        if session_id and not target_idc:
+            return self._fail("invalid", "Cần Target IDC khi nhập session TikTok.")
+        status, payload = self._public_call(
+            "POST",
+            "/v1/tiktok/switch",
+            {"username": username, "sessionId": session_id, "targetIdc": target_idc},
+        )
+        if status == 200 and payload.get("ok"):
+            return self._result(
+                "ACCEPTED_BY_BRIDGE",
+                "NOT_DELIVERED",
+                None,
+                "",
+                f"Đã chuyển kênh TikTok sang @{username}. Listener trên Render sẽ kết nối lại.",
+                extra={"tiktok": payload},
+            )
+        if status == 409:
+            detail = "Bridge công khai đang chạy MOCK. Cần BRIDGE_MODE=live trên Render để đổi kênh."
+        elif status == 401:
+            detail = "Khóa ingest của local không khớp với bridge công khai."
+        elif status == 0:
+            detail = "Không gọi được bridge công khai (kiểm tra BRIDGE_MIRROR_URL / Render đang ngủ)."
+        else:
+            detail = "Bridge công khai từ chối: " + str(payload.get("detail") or status)
+        return self._fail("remote", detail)
+
+    def remote_tiktok_status(self) -> dict[str, Any]:
+        status, payload = self._public_call("GET", "/v1/tiktok")
+        if status == 200:
+            detail = "Đã đọc trạng thái TikTok từ bridge công khai."
+            return self._result("ACCEPTED_BY_BRIDGE", "NOT_DELIVERED", None, "", detail, extra={"tiktok": payload})
+        if status == 0:
+            detail = "Không gọi được bridge công khai (kiểm tra BRIDGE_MIRROR_URL / Render đang ngủ)."
+        elif status == 401:
+            detail = "Khóa ingest của local không khớp với bridge công khai."
+        else:
+            detail = "Bridge công khai từ chối: " + str(payload.get("detail") or status)
+        return self._fail("remote", detail)
+
+    def run_test_suite(self) -> dict[str, Any]:
+        if self.settings.live:
+            return self._blocked()
+        items: list[dict[str, Any]] = []
+
+        def record(key: str, name: str, outcome: dict[str, Any], extra_note: str = "") -> dict[str, Any]:
+            ok = outcome.get("ok") is not False and outcome.get("bridgeStatus") in {"QUEUED", "ACCEPTED_BY_BRIDGE"}
+            detail = extra_note or str(outcome.get("detail") or outcome.get("bridgeStatus") or "")
+            items.append({
+                "id": key,
+                "name": name,
+                "status": "PASS" if ok else "FAIL",
+                "bridgeStatus": str(outcome.get("bridgeStatus") or ""),
+                "robloxStatus": str(outcome.get("robloxStatus") or ""),
+                "eventId": str(outcome.get("eventId") or ""),
+                "detail": clip(detail, 160),
+            })
+            return outcome
+
+        name = "h10" + secrets.token_hex(3)
+        record("viewer", "Tạo người xem test", self.add_viewer(name))
+        liked = record("like500", "Like 500 mở khóa câu", self.send_like(name, 500, None))
+        viewer = liked.get("viewer") or {}
+        items.append({
+            "id": "unlock500",
+            "name": "Bridge xác nhận đủ 500 like",
+            "status": "PASS" if viewer.get("fishingUnlocked") is True and viewer.get("likes") == 500 else "FAIL",
+            "bridgeStatus": str(liked.get("bridgeStatus") or ""),
+            "robloxStatus": "NOT_DELIVERED",
+            "eventId": "",
+            "detail": f"like={viewer.get('likes')} unlocked={viewer.get('fishingUnlocked')}",
+        })
+        record("follow", "Sự kiện Follow", self.send_follow(name))
+        record("cau", "Comment /câu", self.send_comment(name, "/câu", None))
+        record("giat", "Comment /giật", self.send_comment(name, "/giật", None))
+        record("vitri", "Comment /vitri", self.send_comment(name, "/vitri", None))
+        record("gift_camera", "Quà 30 xu mở camera", self.send_gift({
+            "username": name,
+            "purpose": "camera",
+            "giftId": "GIFT_CAMERA",
+            "giftName": "Galaxy",
+            "coinValue": 30,
+            "repeatCount": 1,
+        }))
+        record("gift_steal", "Quà 20 xu tranh cá", self.send_gift({
+            "username": name,
+            "purpose": "steal",
+            "giftId": "GIFT_STEAL",
+            "giftName": "Rose",
+            "coinValue": 20,
+            "repeatCount": 1,
+        }))
+        bait_ok = True
+        bait_bad: list[int] = []
+        for bait in BAITS:
+            outcome = self.preview_bait(bait["tier"], name)
+            if outcome.get("ok") is False or outcome.get("bridgeStatus") != "ACCEPTED_BY_BRIDGE":
+                bait_ok = False
+                bait_bad.append(bait["tier"])
+        items.append({
+            "id": "baits",
+            "name": "Xem trước 5 cấp mồi",
+            "status": "PASS" if bait_ok else "FAIL",
+            "bridgeStatus": "ACCEPTED_BY_BRIDGE" if bait_ok else "FAILED",
+            "robloxStatus": "NOT_DELIVERED",
+            "eventId": "",
+            "detail": "Đã xem trước đủ 5 cấp mồi." if bait_ok else f"Cấp lỗi: {bait_bad}",
+        })
+        record("pull10", "10 lượt /giật", self.send_pulls(name, 10))
+        record("camera_diorama", "Camera Diorama", self.camera_command("DIORAMA", name))
+        record("camera_focus", "Camera /vitri", self.camera_command("VITRI_FOCUS", name))
+        record("camera_showcase", "Camera Showcase", self.camera_command("FISHING_SHOWCASE", name))
+
+        duplicate_id = "h10dup" + secrets.token_hex(4)
+        first = self.send_like(name, 1, duplicate_id)
+        second = self.send_like(name, 1, duplicate_id)
+        items.append({
+            "id": "duplicate",
+            "name": "Chặn eventId trùng",
+            "status": "PASS" if first.get("bridgeStatus") == "QUEUED" and second.get("bridgeStatus") == "ACCEPTED_BY_BRIDGE" else "FAIL",
+            "bridgeStatus": str(second.get("bridgeStatus") or ""),
+            "robloxStatus": "NOT_DELIVERED",
+            "eventId": duplicate_id,
+            "detail": "Lần hai bị coi là trùng, không nhân đôi like.",
+        })
+        self.stop_auto_demo()
+        demo = self.start_auto_demo(10)
+        self.stop_auto_demo()
+        for demo_name in demo.get("viewers") or []:
+            if isinstance(demo_name, str):
+                self.remove_viewer(demo_name)
+        items.append({
+            "id": "auto_demo",
+            "name": "AUTO DEMO 10 viewer",
+            "status": "PASS" if demo.get("ok") is not False and demo.get("requested") == 10 else "FAIL",
+            "bridgeStatus": str(demo.get("bridgeStatus") or ""),
+            "robloxStatus": "NOT_DELIVERED",
+            "eventId": "",
+            "detail": "Đã chạy và dừng AUTO DEMO 10 viewer.",
+        })
+        board = self.dashboard()
+        depth = board["bridge"]["depth"]
+        capacity = board["bridge"]["capacity"]
+        items.append({
+            "id": "queue",
+            "name": "Hàng đợi còn chỗ",
+            "status": "PASS" if depth < capacity else "FAIL",
+            "bridgeStatus": "ACCEPTED_BY_BRIDGE",
+            "robloxStatus": "NOT_DELIVERED",
+            "eventId": "",
+            "detail": f"{depth}/{capacity}",
+        })
+        mirror = board["mirror"]
+        if mirror.get("enabled"):
+            items.append({
+                "id": "mirror",
+                "name": "Mirror tới bridge công khai",
+                "status": "WARN" if mirror.get("lastError") else "PASS",
+                "bridgeStatus": "ACCEPTED_BY_BRIDGE",
+                "robloxStatus": "NOT_DELIVERED",
+                "eventId": "",
+                "detail": f"queued={mirror.get('queued')} sent={mirror.get('sent')} failed={mirror.get('failed')} {mirror.get('lastError') or ''}".strip(),
+            })
+        else:
+            items.append({
+                "id": "mirror",
+                "name": "Mirror tới bridge công khai",
+                "status": "WARN",
+                "bridgeStatus": "OFF",
+                "robloxStatus": "NOT_DELIVERED",
+                "eventId": "",
+                "detail": "BRIDGE_MIRROR_URL đang tắt.",
+            })
+        render = board["render"]
+        items.append({
+            "id": "render",
+            "name": "Bridge công khai (Render)",
+            "status": "PASS" if render.get("ok") else "WARN",
+            "bridgeStatus": "ACCEPTED_BY_BRIDGE" if render.get("ok") else "OFF",
+            "robloxStatus": "NOT_DELIVERED",
+            "eventId": "",
+            "detail": (
+                f"v{render.get('version') or '?'} queue={render.get('depth')} ack={render.get('ackCursor')} {render.get('latencyMs')} ms"
+                if render.get("ok")
+                else str(render.get("note") or render.get("error") or "OFF")
+            ),
+        })
+        telemetry = board["roblox"]["telemetry"]
+        items.append({
+            "id": "roblox_ack",
+            "name": "Roblox ACK + telemetry",
+            "status": "PASS" if board["roblox"]["telemetryFresh"] else "WARN",
+            "bridgeStatus": "ACCEPTED_BY_BRIDGE",
+            "robloxStatus": "ACKNOWLEDGED" if telemetry else "NOT_DELIVERED",
+            "eventId": "",
+            "detail": (
+                f"fps={telemetry.get('fps')} ramMb={telemetry.get('ramMb')} age={board['roblox']['telemetryAgeSeconds']}s"
+                if telemetry
+                else "Chưa có telemetry. Chạy Roblox để ACK batch."
+            ),
+        })
+        passed = sum(1 for row in items if row["status"] == "PASS")
+        failed = sum(1 for row in items if row["status"] == "FAIL")
+        warned = sum(1 for row in items if row["status"] == "WARN")
+        report = {
+            "ok": failed == 0,
+            "result": "PASS" if failed == 0 else "FAIL",
+            "generatedAt": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+            "mode": self.settings.mode,
+            "mockOnly": not self.settings.live,
+            "passed": passed,
+            "failed": failed,
+            "warned": warned,
+            "total": len(items),
+            "items": items,
+            "note": "PASS/FAIL đo đường bridge MOCK. Render và Roblox là WARN khi chưa chạy, không bịa ACK.",
+        }
+        self.report = report
+        return self._result(
+            "ACCEPTED_BY_BRIDGE",
+            "NOT_DELIVERED",
+            None,
+            "",
+            f"Test Report: {report['result']} · {passed} PASS · {failed} FAIL · {warned} WARN.",
+            extra={"report": report},
+        )
 
     def basic_test(self) -> dict[str, Any]:
         if self.settings.live:
@@ -970,14 +1478,20 @@ class HostState:
             self.stress["note"] = "stopped"
         return self._result("ACCEPTED_BY_BRIDGE", "NOT_DELIVERED", None, "", "Đã dừng bài test.", extra={"sent": sent})
 
-    def start_auto_demo(self) -> dict[str, Any]:
+    def start_auto_demo(self, size: Any = None) -> dict[str, Any]:
         if self.settings.live:
             return self._blocked()
+        if size is None:
+            size = AUTO_DEMO_VIEWERS
+        if isinstance(size, bool) or not isinstance(size, int) or size not in AUTO_DEMO_SIZES:
+            return self._fail("invalid", "AUTO DEMO chỉ nhận 10, 100 hoặc 500 viewer.")
         with self.lock:
             if self.demo["running"]:
                 return self._fail("busy", "AUTO DEMO đang chạy. Bấm dừng trước.")
             if self.stress["running"]:
                 return self._fail("busy", "Đang có bài test tải. Bấm dừng trước.")
+            if self.queue.status()["depth"] + size + 64 > self.queue.capacity:
+                return self._fail("busy", f"Hàng đợi không đủ chỗ cho {size} viewer. Reset phiên trước.")
         names: list[str] = []
         rows: list[tuple[str, dict[str, Any]]] = []
         for _ in range(AUTO_DEMO_VIEWERS):
@@ -985,6 +1499,7 @@ class HostState:
             user_id = "ma" + secrets.token_hex(5)
             rows.append((user_id, self._blank(name, user_id)))
             names.append(name)
+        extra = max(0, size - AUTO_DEMO_VIEWERS)
         with self.lock:
             for user_id, row in rows:
                 self.viewers[user_id] = row
@@ -995,20 +1510,23 @@ class HostState:
                 "step": "khởi động",
                 "sent": 0,
                 "wave": 0,
+                "requested": size,
+                "joinPending": extra,
                 "viewers": list(names),
             }
             run_stop = threading.Event()
             self.demo = state
             self.demo_stop = run_stop
-        worker = threading.Thread(target=self._auto_demo_loop, args=(list(names), state, run_stop), daemon=True)
+        worker = threading.Thread(target=self._auto_demo_loop, args=(list(names), state, run_stop, extra), daemon=True)
         worker.start()
+        join_note = f" {extra} viewer còn lại vào dần." if extra else ""
         return self._result(
             "ACCEPTED_BY_BRIDGE",
             "NOT_DELIVERED",
             None,
             "",
-            f"AUTO DEMO đã bắt đầu với {AUTO_DEMO_VIEWERS} viewer giả lập trên bridge. Chưa phải ACK Roblox.",
-            extra={"viewers": list(names), "appliedOnRoblox": False, "mockOnly": True},
+            f"AUTO DEMO đã bắt đầu với {size} viewer giả lập trên bridge.{join_note} Chưa phải ACK Roblox.",
+            extra={"viewers": list(names), "requested": size, "joinPending": extra, "appliedOnRoblox": False, "mockOnly": True},
         )
 
     def stop_auto_demo(self) -> dict[str, Any]:
@@ -1138,11 +1656,41 @@ class HostState:
         plan.append(("bình luận từ " + spotter, lambda: self.send_comment(spotter, AUTO_DEMO_CHAT[0], None)))
         return plan
 
-    def _auto_demo_loop(self, names: list[str], state: dict[str, Any], stop: threading.Event) -> None:
+    def _auto_demo_loop(
+        self,
+        names: list[str],
+        state: dict[str, Any],
+        stop: threading.Event,
+        extra: int = 0,
+    ) -> None:
         sent = 0
         wave = 0
         note = "done"
         try:
+            pending = int(extra or 0)
+            if pending > 0:
+                with self.lock:
+                    state["step"] = "cho viewer vào"
+                while pending > 0 and not stop.is_set():
+                    result = self.add_viewer(None)
+                    if result.get("bridgeStatus") not in {"QUEUED", "ACCEPTED_BY_BRIDGE"}:
+                        note = "join_failed"
+                        break
+                    joined = (result.get("viewer") or {}).get("username")
+                    pending -= 1
+                    sent += 1
+                    with self.lock:
+                        state["sent"] = sent
+                        state["joinPending"] = pending
+                        if isinstance(joined, str) and joined:
+                            state["viewers"].append(joined)
+                    if stop.wait(AUTO_DEMO_JOIN_PACE):
+                        break
+                with self.lock:
+                    state["joinPending"] = pending
+                if stop.is_set():
+                    note = "stopped"
+                    return
             while not stop.is_set():
                 wave += 1
                 with self.lock:

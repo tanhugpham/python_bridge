@@ -49,10 +49,25 @@ Không mở file HTML bằng `file://`. Trang đó không có CORS và không ch
 
 - `GET /host`, `/host/styles.css`, `/host/app.js`
 - `GET /host/session`
-- `GET /host/dashboard`, `/host/viewers`, `/host/baits`, `/host/leaderboard`, `/host/struggle`, `/host/results`, `/host/events`, `/host/metrics`, `/host/stress`
+- `GET /host/dashboard`, `/host/viewers`, `/host/baits`, `/host/leaderboard`, `/host/struggle`, `/host/results`, `/host/events`, `/host/metrics`, `/host/stress`, `/host/auto-demo`
+- `GET /host/telemetry`, `/host/report`, `/host/live-settings`
 - `POST /host/action`
 
 Schema sự kiện không thêm loại mới. Like, comment, gift vẫn là bốn loại cũ. Force và một số cảnh camera chỉ được ghi nhận trên bridge vì game chưa có kênh nhận khi HTTP Roblox đang tắt.
+
+Mọi hành động trên trang đều gọi một endpoint thật ở trên. Trang không tự cộng điểm, không tự ghi ACK, và không giữ khóa nào trong trình duyệt.
+
+## Ba bảng mới
+
+- **Telemetry** (`GET /host/telemetry`): độ sâu hàng đợi bridge, con trỏ ACK, tuổi và độ mới của telemetry Roblox. Chưa có telemetry thì để trống, không bịa số.
+- **Report** (`run_test_suite` → `GET /host/report`): 20 dòng. `PASS`/`FAIL` chỉ đo đường bridge MOCK; dòng Render và Roblox là `WARN` cho đến khi có phản hồi thật. Xuất JSON và CSV ngay trong trang, từ báo cáo vừa chạy — không có endpoint tải file riêng.
+- **Live** (`GET /host/live-settings`, `save_live_settings`): chỉ lưu bản nháp `{tiktokUsername, mode, bridgeUrl, updatedAt}` vào `BRIDGE_SETTINGS_PATH` (mặc định `data/live-settings.json`). Kết quả luôn là `applied=false`; bản nháp chỉ được đọc khi khởi động bridge với `BRIDGE_SAVED_SETTINGS=1`. `liveAllowed` luôn `false`, và mọi hành động khác trả 409 khi bridge ở chế độ `live`. Trang chỉ gửi đúng trường `tiktokUsername`, không gửi viewer đang chọn vào bản nháp. Khi đọc lại, trường rỗng hoặc sai định dạng bị bỏ khỏi `draft`, nên `bridgeUrl` trống sẽ không xuất hiện trong phản hồi.
+
+## AUTO DEMO
+
+Ô chọn người xem chỉ có 10, 100 hoặc 500 — đúng ba cỡ bridge chấp nhận. Bridge trả lỗi rõ nếu nhận cỡ khác. Mỗi vòng chỉ 10 người xuất hiện cùng lúc, phần còn lại chờ join. Hàng đợi phải còn chỗ: 500 viewer cần hàng gần như trống (trần 2000).
+
+Nút **Tạo ngư dân mẫu** nhận 1–10 người mỗi lần; mỗi ngư dân gửi 500 tim và comment `câu`, nên bridge kiểm tra chỗ trống trước từng người.
 
 ## Mồi
 

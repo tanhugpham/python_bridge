@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import importlib.metadata as metadata
+import importlib.util
 import json
 import os
 import struct
 import tempfile
 import time
 import unittest
+from dataclasses import replace
 from pathlib import Path
 from unittest.mock import patch
 
@@ -28,6 +30,9 @@ from fishinglive_bridge.schema import parse_event
 
 INGEST = "ingest-key-0123456789"
 READ = "read-key-0123456789"
+# The TikTokLive check reads the installed package, so it only runs where the
+# bridge venv actually has TikTokLive installed. Skipping is reported, not hidden.
+HAS_TIKTOKLIVE = importlib.util.find_spec("TikTokLive") is not None
 
 
 class User:
@@ -103,6 +108,7 @@ class BridgeTests(unittest.TestCase):
             cfg = load_settings()
         self.assertEqual((cfg.host, cfg.port), ("127.0.0.1", 8787))
 
+    @unittest.skipUnless(HAS_TIKTOKLIVE, "TikTokLive 7.0.1 chưa cài trong virtualenv này.")
     def test_installed_tiktoklive_api(self) -> None:
         from TikTokLive.events import CommentEvent, FollowEvent, GiftEvent, LikeEvent
 
@@ -594,6 +600,231 @@ class BridgeTests(unittest.TestCase):
             self.assertFalse(app.state.host.demo["running"])
             self.assertLessEqual(app.state.host.queue.status()["depth"], 2000)
 
+    def test_ack_carries_telemetry_for_host_page(self) -> None:
+        page = Path(__file__).resolve().parents[1] / "host-controller"
+        with tempfile.TemporaryDirectory() as folder:
+            app = create_app(settings(Path(folder) / "queue.json"), EventQueue(), host_dir=page)
+            local = TestClient(app, client=("127.0.0.1", 50000))
+            headers = {"Host": "127.0.0.1:8787"}
+            self.assertEqual(local.get("/v1/telemetry").status_code, 401)
+            self.assertEqual(local.get("/v1/telemetry", headers={"x-api-key": "wrong-key-000000"}).status_code, 401)
+            acked = local.post(
+                "/v1/events/ack",
+                headers={"x-api-key": READ},
+                json={
+                    "sequences": [],
+                    "telemetry": {
+                        "fps": 59.94,
+                        "physicsFps": 60,
+                        "ramMb": 812.5,
+                        "players": 1,
+                        "jobId": "job-1",
+                        "secret": "SHOULD_NOT_LEAK",
+                        "ramMbShadow": -5,
+                    },
+                },
+            )
+            self.assertEqual(acked.status_code, 200)
+            self.assertEqual(acked.json()["acked"], 0)
+            # Roblox keeps using x-api-key. The mirror holds the ingest key, so both pass.
+            for key in (READ, INGEST):
+                row = local.get("/v1/telemetry", headers={"x-api-key": key})
+                self.assertEqual(row.status_code, 200)
+                body = row.json()
+                self.assertEqual(body["telemetry"]["fps"], 59.94)
+                self.assertEqual(body["telemetry"]["jobId"], "job-1")
+                self.assertTrue(body["fresh"])
+                self.assertEqual(body["depth"], 0)
+                self.assertNotIn("secret", str(body))
+                self.assertNotIn("ramMbShadow", str(body))
+                self.assertNotIn(READ, str(body))
+                self.assertNotIn(INGEST, str(body))
+            # Out-of-range frames are dropped, the last good snapshot stays.
+            self.assertEqual(
+                local.post(
+                    "/v1/events/ack",
+                    headers={"x-api-key": READ},
+                    json={"sequences": [], "telemetry": {"fps": 9999, "ramMb": "high"}},
+                ).status_code,
+                200,
+            )
+            kept = local.get("/v1/telemetry", headers={"x-api-key": READ}).json()
+            self.assertEqual(kept["telemetry"]["fps"], 59.94)
+            self.assertEqual(kept["telemetry"]["ramMb"], 812.5)
+            board = local.get("/host/dashboard", headers=headers).json()
+            self.assertEqual(board["roblox"]["telemetrySource"], "local")
+            self.assertTrue(board["roblox"]["telemetryFresh"])
+            self.assertEqual(board["roblox"]["telemetry"]["ramMb"], 812.5)
+            scoped = local.get("/host/telemetry", headers=headers)
+            self.assertEqual(scoped.status_code, 200)
+            self.assertEqual(scoped.json()["telemetry"]["fps"], 59.94)
+            self.assertTrue(scoped.json()["fresh"])
+            self.assertNotIn(INGEST, scoped.text)
+
+    def test_live_settings_draft_never_enables_live(self) -> None:
+        page = Path(__file__).resolve().parents[1] / "host-controller"
+        with tempfile.TemporaryDirectory() as folder:
+            draft_path = Path(folder) / "live-settings.json"
+            cfg = replace(settings(Path(folder) / "queue.json"), live_settings_path=str(draft_path))
+            app = create_app(cfg, EventQueue(), host_dir=page)
+            local = TestClient(app, client=("127.0.0.1", 50000))
+            headers = {"Host": "127.0.0.1:8787", "Origin": "http://127.0.0.1:8787"}
+            token = local.get("/host/session", headers=headers).json()["csrf"]
+            auth = {**headers, "X-CSRF-Token": token}
+            opened = local.get("/host/live-settings", headers=headers)
+            self.assertEqual(opened.status_code, 200)
+            self.assertEqual(opened.json()["draft"], {})
+            self.assertTrue(opened.json()["mockMode"])
+            self.assertFalse(opened.json()["savedSettingsEnabled"])
+            self.assertFalse(opened.json()["liveAllowed"])
+            saved = local.post(
+                "/host/action",
+                headers=auth,
+                json={
+                    "action": "save_live_settings",
+                    "tiktokUsername": "@studio_host",
+                    "mode": "live",
+                    "bridgeUrl": "https://python-bridge-6v9w.onrender.com/",
+                },
+            )
+            self.assertEqual(saved.status_code, 200)
+            body = saved.json()
+            self.assertTrue(body["ok"])
+            self.assertFalse(body["applied"])
+            self.assertTrue(body["liveBlocked"])
+            self.assertIn("LIVE", body["warning"])
+            self.assertEqual(body["draft"]["tiktokUsername"], "studio_host")
+            self.assertEqual(body["draft"]["bridgeUrl"], "https://python-bridge-6v9w.onrender.com")
+            self.assertTrue(draft_path.is_file())
+            stored = draft_path.read_text(encoding="utf-8")
+            self.assertEqual(json.loads(stored)["mode"], "live")
+            self.assertNotIn(INGEST, stored)
+            self.assertNotIn(READ, stored)
+            state = local.get("/host/live-settings", headers=headers).json()
+            self.assertEqual(state["draft"]["mode"], "live")
+            self.assertEqual(state["mode"], "mock")
+            self.assertTrue(state["mockMode"])
+            self.assertFalse(state["savedSettingsEnabled"])
+            self.assertFalse(state["liveAllowed"])
+            board = local.get("/host/dashboard", headers=headers).json()
+            self.assertTrue(board["mockMode"])
+            self.assertEqual(board["bridge"]["mode"], "mock")
+            bad_name = local.post(
+                "/host/action",
+                headers=auth,
+                json={"action": "save_live_settings", "tiktokUsername": "a b", "mode": "mock", "bridgeUrl": ""},
+            ).json()
+            self.assertFalse(bad_name["ok"])
+            self.assertEqual(bad_name["error"], "invalid")
+            bad_mode = local.post(
+                "/host/action",
+                headers=auth,
+                json={"action": "save_live_settings", "tiktokUsername": "studio_host", "mode": "turbo", "bridgeUrl": ""},
+            ).json()
+            self.assertFalse(bad_mode["ok"])
+            bad_url = local.post(
+                "/host/action",
+                headers=auth,
+                json={"action": "save_live_settings", "tiktokUsername": "studio_host", "mode": "mock", "bridgeUrl": "ftp://x"},
+            ).json()
+            self.assertFalse(bad_url["ok"])
+            refresh = local.post("/host/action", headers=auth, json={"action": "remote_refresh"}).json()
+            self.assertTrue(refresh["ok"])
+            self.assertFalse(refresh["render"]["enabled"])
+            self.assertIsNone(local.get("/host/report", headers=headers).json()["report"])
+
+    def test_host_test_suite_report_is_honest(self) -> None:
+        page = Path(__file__).resolve().parents[1] / "host-controller"
+        with tempfile.TemporaryDirectory() as folder:
+            draft_path = Path(folder) / "live-settings.json"
+            cfg = replace(settings(Path(folder) / "queue.json"), live_settings_path=str(draft_path))
+            queue = EventQueue()
+            app = create_app(cfg, queue, host_dir=page)
+            local = TestClient(app, client=("127.0.0.1", 50000))
+            headers = {"Host": "127.0.0.1:8787", "Origin": "http://127.0.0.1:8787"}
+            token = local.get("/host/session", headers=headers).json()["csrf"]
+            auth = {**headers, "X-CSRF-Token": token}
+            ran = local.post("/host/action", headers=auth, json={"action": "run_test_suite"})
+            self.assertEqual(ran.status_code, 200)
+            result = ran.json()
+            self.assertEqual(result["bridgeStatus"], "ACCEPTED_BY_BRIDGE")
+            self.assertEqual(result["robloxStatus"], "NOT_DELIVERED")
+            report = result["report"]
+            self.assertEqual(report["result"], "PASS")
+            self.assertEqual(report["failed"], 0)
+            self.assertTrue(report["mockOnly"])
+            self.assertEqual(report["total"], len(report["items"]))
+            self.assertEqual(report["passed"] + report["failed"] + report["warned"], report["total"])
+            ids = [row["id"] for row in report["items"]]
+            for key in (
+                "viewer", "like500", "unlock500", "follow", "cau", "giat", "vitri",
+                "gift_camera", "gift_steal", "baits", "pull10",
+                "camera_diorama", "camera_focus", "camera_showcase", "duplicate",
+                "auto_demo", "queue", "mirror", "render", "roblox_ack",
+            ):
+                self.assertIn(key, ids)
+            rows = {row["id"]: row for row in report["items"]}
+            self.assertEqual({row["status"] for row in report["items"]} - {"PASS", "FAIL", "WARN"}, set())
+            self.assertEqual(rows["duplicate"]["status"], "PASS")
+            self.assertEqual(rows["roblox_ack"]["status"], "WARN")
+            self.assertEqual(rows["roblox_ack"]["robloxStatus"], "NOT_DELIVERED")
+            self.assertEqual(rows["mirror"]["status"], "WARN")
+            self.assertEqual(rows["queue"]["status"], "PASS")
+            self.assertNotIn("ACKNOWLEDGED", str(report))
+            served = local.get("/host/report", headers=headers).json()["report"]
+            self.assertEqual(served["generatedAt"], report["generatedAt"])
+            self.assertEqual(local.get("/host/dashboard", headers=headers).json()["report"]["result"], "PASS")
+            # The ten demo viewers are removed again; only the suite's own viewer stays.
+            self.assertEqual(local.get("/host/dashboard", headers=headers).json()["viewers"], 1)
+            self.assertLess(queue.status()["depth"], queue.capacity)
+            seed = local.post("/host/action", headers=auth, json={"action": "seed_fishers", "count": 3}).json()
+            self.assertTrue(seed["ok"])
+            self.assertEqual(seed["created"], 3)
+            self.assertEqual(len(seed["fishers"]), 3)
+            self.assertFalse(seed["appliedOnRoblox"])
+            fishers = local.get("/host/viewers", headers=headers, params={"q": "", "offset": 0}).json()
+            self.assertGreaterEqual(fishers["total"], 4)
+            self.assertFalse(local.post("/host/action", headers=auth, json={"action": "seed_fishers", "count": 11}).json()["ok"])
+
+    def test_auto_demo_sizes_and_live_gate(self) -> None:
+        page = Path(__file__).resolve().parents[1] / "host-controller"
+        with tempfile.TemporaryDirectory() as folder:
+            cfg = replace(settings(Path(folder) / "queue.json"), live_settings_path=str(Path(folder) / "live.json"))
+            app = create_app(cfg, EventQueue(), host_dir=page)
+            local = TestClient(app, client=("127.0.0.1", 50000))
+            headers = {"Host": "127.0.0.1:8787", "Origin": "http://127.0.0.1:8787"}
+            token = local.get("/host/session", headers=headers).json()["csrf"]
+            auth = {**headers, "X-CSRF-Token": token}
+            big = local.post("/host/action", headers=auth, json={"action": "auto_demo_start", "viewers": 100})
+            self.assertEqual(big.status_code, 200)
+            body = big.json()
+            self.assertTrue(body["ok"])
+            self.assertEqual(body["requested"], 100)
+            self.assertEqual(body["joinPending"], 90)
+            self.assertEqual(len(body["viewers"]), 10)
+            state = local.get("/host/auto-demo", headers=headers).json()
+            self.assertTrue(state["running"])
+            self.assertEqual(state["requested"], 100)
+            self.assertLessEqual(state["joinPending"], 90)
+            self.assertGreaterEqual(state["joinPending"], 0)
+            busy = local.post("/host/action", headers=auth, json={"action": "auto_demo_start", "viewers": 500}).json()
+            self.assertFalse(busy["ok"])
+            stopped = local.post("/host/action", headers=auth, json={"action": "auto_demo_stop"})
+            self.assertEqual(stopped.status_code, 200)
+            time.sleep(0.2)
+            self.assertFalse(local.get("/host/auto-demo", headers=headers).json()["running"])
+            invalid = local.post("/host/action", headers=auth, json={"action": "auto_demo_start", "viewers": 55}).json()
+            self.assertFalse(invalid["ok"])
+            self.assertEqual(invalid["error"], "invalid")
+            live = replace(cfg, mode="live", tiktok_username="host")
+            live_app = create_app(live, EventQueue(), host_dir=page)
+            live_client = TestClient(live_app, client=("127.0.0.1", 50000))
+            live_token = live_client.get("/host/session", headers=headers).json()["csrf"]
+            live_auth = {**headers, "X-CSRF-Token": live_token}
+            self.assertEqual(live_client.post("/host/action", headers=live_auth, json={"action": "run_test_suite"}).status_code, 409)
+            self.assertEqual(live_client.post("/host/action", headers=live_auth, json={"action": "auto_demo_start", "viewers": 10}).status_code, 409)
+            self.assertEqual(live_client.post("/host/action", headers=live_auth, json={"action": "seed_fishers", "count": 2}).status_code, 409)
+
     def test_source_cannot_send_chat(self) -> None:
         source = Path(__file__).parents[1] / "src" / "fishinglive_bridge" / "tiktok_source.py"
         text = source.read_text(encoding="utf-8")
@@ -776,7 +1007,7 @@ class MirrorTests(unittest.TestCase):
             app = create_app(self.mirror_settings(Path(folder)), EventQueue())
             health = TestClient(app).get("/v1/health").json()
         self.assertTrue(health["ok"])
-        self.assertEqual(health["version"], "1.3.1")
+        self.assertEqual(health["version"], "1.4.0")
 
     def test_stress_join_is_mirrored(self) -> None:
         posted: list[dict] = []
@@ -1137,6 +1368,115 @@ class DurabilityTests(unittest.TestCase):
         self.assertTrue(cfg.journal_path.endswith("queue-journal.sqlite3"))
         self.assertTrue(cfg.outbox_path.endswith("mirror-outbox.sqlite3"))
         self.assertEqual(cfg.outbox_ttl, 1800.0)
+
+
+class FakeLive:
+    """Minimal stand-in for TikTokSource; records the switch without a network call."""
+
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, str, str]] = []
+        self.state = {
+            "username": "old_host",
+            "connected": False,
+            "lastError": "",
+            "switches": 0,
+            "hasSession": False,
+            "updatedAt": 0.0,
+        }
+
+    def status(self) -> dict:
+        return dict(self.state)
+
+    def apply(self, username: str, session_id: str = "", target_idc: str = "") -> dict:
+        if not username:
+            raise ValueError("invalid_username")
+        self.calls.append((username, session_id, target_idc))
+        self.state = {
+            **self.state,
+            "username": username,
+            "switches": self.state["switches"] + 1,
+            "hasSession": bool(session_id),
+        }
+        return dict(self.state)
+
+
+class LiveSwitchTests(unittest.TestCase):
+    def test_switch_endpoint_is_authenticated_and_live_only(self) -> None:
+        auth = {"X-Bridge-Key": INGEST}
+        with tempfile.TemporaryDirectory() as folder:
+            cfg = replace(settings(Path(folder) / "queue.json"), mode="live", tiktok_username="old_host")
+            fake = FakeLive()
+            live = TestClient(create_app(cfg, EventQueue(), live=fake))
+            self.assertEqual(live.get("/v1/tiktok").status_code, 401)
+            switched = live.post(
+                "/v1/tiktok/switch",
+                headers=auth,
+                json={"username": "@New_Host", "sessionId": "sid-value", "targetIdc": "useast5"},
+            )
+            self.assertEqual(switched.status_code, 200)
+            self.assertEqual(fake.calls, [("new_host", "sid-value", "useast5")])
+            self.assertNotIn("sid-value", switched.text)
+            self.assertNotIn("session", switched.json())
+            self.assertEqual(
+                live.post("/v1/tiktok/switch", headers=auth, json={"username": "a b"}).status_code, 422
+            )
+            self.assertEqual(
+                live.post(
+                    "/v1/tiktok/switch", headers=auth, json={"username": "new_host", "sessionId": "sid"}
+                ).status_code,
+                422,
+            )
+            status = live.get("/v1/tiktok", headers=auth).json()
+            self.assertTrue(status["live"])
+            self.assertEqual(status["username"], "new_host")
+            self.assertTrue(status["hasSession"])
+
+            mock = TestClient(create_app(settings(Path(folder) / "other.json"), EventQueue()))
+            self.assertEqual(
+                mock.post("/v1/tiktok/switch", headers=auth, json={"username": "new_host"}).status_code, 409
+            )
+            mock_status = mock.get("/v1/tiktok", headers=auth).json()
+            self.assertFalse(mock_status["live"])
+            self.assertEqual(mock_status["mode"], "mock")
+
+    def test_host_proxy_validates_and_needs_a_mirror(self) -> None:
+        page = Path(__file__).resolve().parents[1] / "host-controller"
+        with tempfile.TemporaryDirectory() as folder:
+            cfg = replace(
+                settings(Path(folder) / "queue.json"),
+                live_settings_path=str(Path(folder) / "live-settings.json"),
+            )
+            app = create_app(cfg, EventQueue(), host_dir=page)
+            local = TestClient(app, client=("127.0.0.1", 50000))
+            headers = {"Host": "127.0.0.1:8787", "Origin": "http://127.0.0.1:8787"}
+            token = local.get("/host/session", headers=headers).json()["csrf"]
+            auth = {**headers, "X-CSRF-Token": token}
+            invalid = local.post(
+                "/host/action",
+                headers=auth,
+                json={"action": "live_switch_tiktok", "tiktokUsername": "a b", "sessionId": "", "targetIdc": ""},
+            ).json()
+            self.assertFalse(invalid["ok"])
+            self.assertEqual(invalid["error"], "invalid")
+            missing_idc = local.post(
+                "/host/action",
+                headers=auth,
+                json={"action": "live_switch_tiktok", "tiktokUsername": "studio_host", "sessionId": "sid", "targetIdc": ""},
+            ).json()
+            self.assertFalse(missing_idc["ok"])
+            self.assertEqual(missing_idc["error"], "invalid")
+            no_mirror = local.post(
+                "/host/action",
+                headers=auth,
+                json={"action": "live_switch_tiktok", "tiktokUsername": "studio_host", "sessionId": "", "targetIdc": ""},
+            ).json()
+            self.assertFalse(no_mirror["ok"])
+            self.assertEqual(no_mirror["error"], "remote")
+            self.assertIn("BRIDGE_MIRROR_URL", no_mirror["detail"])
+            status = local.post("/host/action", headers=auth, json={"action": "live_tiktok_status"}).json()
+            self.assertFalse(status["ok"])
+            self.assertEqual(status["error"], "remote")
+
 
 
 def logging_record(message: str):

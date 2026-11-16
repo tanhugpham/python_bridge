@@ -96,8 +96,32 @@ tr.pick { background: #16424a; }
 .ok-text { color: var(--green); }
 .bad-text { color: var(--red); }
 .gold-text { color: var(--gold); }
+.status-list { display: grid; gap: 6px; margin-top: 10px; }
+.status-row {
+  display: grid;
+  grid-template-columns: minmax(130px, 220px) 96px 1fr;
+  gap: 8px;
+  align-items: center;
+  padding: 6px 0;
+  border-bottom: 1px dashed var(--line);
+  font-size: 13px;
+}
+.status-row .status-state { color: var(--muted); font-weight: 700; }
+.status-row .status-detail { color: var(--muted); white-space: normal; }
+tr.pass td:nth-child(3) { color: var(--green); }
+tr.fail td:nth-child(3) { color: var(--red); }
+tr.warn td:nth-child(3) { color: var(--gold); }
 @media (max-width: 900px) {
   .app { grid-template-columns: 1fr; }
   .side { border-right: 0; border-bottom: 1px solid var(--line); }
   nav { grid-template-columns: repeat(auto-fill, minmax(120px, 1fr)); }
+}
+@media (max-width: 700px) {
+  header { flex-direction: column; }
+  .main { padding: 12px 12px 32px; }
+  .cards { grid-template-columns: repeat(auto-fill, minmax(132px, 1fr)); }
+  .status-row { grid-template-columns: 1fr; }
+  input, select, button { max-width: 100%; }
+  table { font-size: 12px; }
+  .row > input { flex: 1 1 140px; }
 }

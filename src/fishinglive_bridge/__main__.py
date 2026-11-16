@@ -43,20 +43,23 @@ def main() -> None:
             "durable" if mirror.durable else "memory",
         )
 
+    live_source = None
+    if settings.live:
+        from fishinglive_bridge.tiktok_source import TikTokSource
+
+        live_source = TikTokSource(
+            settings,
+            queue.publish,
+            on_drop=queue.note_transport_drop,
+            avatars=avatars,
+        )
+
     @asynccontextmanager
     async def lifespan(_app):
         stop = asyncio.Event()
         task = None
-        if settings.live:
-            from fishinglive_bridge.tiktok_source import TikTokSource
-
-            source = TikTokSource(
-                settings,
-                queue.publish,
-                on_drop=queue.note_transport_drop,
-                avatars=avatars,
-            )
-            task = asyncio.create_task(source.run(stop))
+        if live_source is not None:
+            task = asyncio.create_task(live_source.run(stop))
             logger.info("live mode started for the configured username")
         else:
             logger.info("mock mode: TikTok client is not started")
@@ -87,6 +90,7 @@ def main() -> None:
         control_dir=control_dir,
         host_dir=host_dir,
         mirror=mirror,
+        live=live_source,
     )
     uvicorn.run(
         app,

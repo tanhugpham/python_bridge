@@ -24,6 +24,9 @@
       <button type="button" data-panel="camera">Camera</button>
       <button type="button" data-panel="leaderboard">Bảng xếp hạng</button>
       <button type="button" data-panel="performance">Hiệu năng</button>
+      <button type="button" data-panel="telemetry">Telemetry Roblox</button>
+      <button type="button" data-panel="report">Kiểm tra</button>
+      <button type="button" data-panel="live">Cấu hình LIVE</button>
       <button type="button" data-panel="logs">Nhật ký</button>
       <button type="button" data-panel="settings">Cài đặt</button>
     </nav>
@@ -55,6 +58,11 @@
           <button type="button" id="reset-viewer">Đặt lại người</button>
         </div>
         <div class="row" id="viewer-counts"></div>
+        <div class="row">
+          <input id="seed-count" type="number" min="1" max="10" value="3" placeholder="Số ngư dân mẫu">
+          <button type="button" class="gold" id="seed-fishers">Tạo ngư dân mẫu</button>
+          <button type="button" id="send-follow">Gửi Follow</button>
+        </div>
         <p class="note">Mỗi người một userId mock riêng. Tên mock_ không trùng. Sự kiện join đi vào hàng đợi bridge.</p>
       </div>
       <div class="card">
@@ -199,6 +207,78 @@
       <div class="cards" id="perf-cards"></div>
       <p class="note" id="perf-note"></p>
     </section>
+    <section id="telemetry" class="panel">
+      <div class="cards" id="telemetry-cards"></div>
+      <div class="card">
+        <h2>Nguồn telemetry Roblox</h2>
+        <p class="note" id="telemetry-note"></p>
+        <div class="row">
+          <button type="button" id="telemetry-refresh">Đọc lại telemetry</button>
+          <button type="button" class="gold" id="telemetry-render">Kiểm tra bridge Render</button>
+        </div>
+        <div class="status-list" id="telemetry-status"></div>
+        <p class="feedback" id="telemetry-feedback"></p>
+        <ul class="rules">
+          <li>FPS, RAM, players chỉ đi kèm ACK thật của /v1/events/ack.</li>
+          <li>Chưa có ACK thì trang ghi CHƯA CÓ TELEMETRY, không bịa số.</li>
+          <li>Snapshot cũ hơn 90 giây bị coi là KHÔNG TƯƠI.</li>
+        </ul>
+      </div>
+    </section>
+    <section id="report" class="panel">
+      <div class="card">
+        <h2>Test Report</h2>
+        <div class="row">
+          <button type="button" class="gold" id="report-run">Chạy toàn bộ test</button>
+          <button type="button" id="report-export">Xuất JSON</button>
+          <button type="button" id="report-export-csv">Xuất CSV</button>
+        </div>
+        <p class="note" id="report-note">Bảng này đo đường bridge MOCK. Render và Roblox là WARN khi chưa chạy, không bịa ACK.</p>
+        <div class="cards" id="report-cards"></div>
+        <p class="feedback" id="report-feedback"></p>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr><th>ID</th><th>Hạng mục</th><th>Kết quả</th><th>Bridge</th><th>Roblox</th><th>EventId</th><th>Chi tiết</th></tr>
+            </thead>
+            <tbody id="report-body"></tbody>
+          </table>
+        </div>
+      </div>
+    </section>
+    <section id="live" class="panel">
+      <div class="card">
+        <h2>Cấu hình kênh (bản nháp)</h2>
+        <p class="note">Bản nháp chỉ ghi vào live-settings.json. Trang này không bật LIVE và không đổi BRIDGE_MODE. Bridge chỉ đọc bản nháp khi khởi động với BRIDGE_SAVED_SETTINGS=1.</p>
+        <div class="row">
+          <input id="live-username" placeholder="TikTok username (vd: studio_host)">
+          <select id="live-mode">
+            <option value="mock">MOCK</option>
+            <option value="live">LIVE (chỉ lưu nháp)</option>
+          </select>
+          <input id="live-bridge-url" placeholder="https://python-bridge-xxx.onrender.com">
+          <button type="button" class="primary" id="live-save">Lưu bản nháp</button>
+        </div>
+        <div class="row">
+          <input id="live-session" type="password" placeholder="sessionid TikTok (chỉ gửi lên Render, không lưu file)">
+          <input id="live-idc" placeholder="tt-target-idc (vd useast5, sea1)">
+          <button type="button" class="gold" id="live-apply">Đổi kênh trên Render</button>
+          <button type="button" id="live-status-btn">Trạng thái TikTok</button>
+        </div>
+        <p class="feedback" id="live-feedback"></p>
+      </div>
+      <div class="card">
+        <h2>Trạng thái kênh</h2>
+        <div class="status-list" id="live-tiktok"></div>
+        <div class="status-list" id="live-status"></div>
+        <div class="row">
+          <button type="button" id="live-reload">Đọc lại bản nháp</button>
+          <button type="button" class="gold" id="live-refresh">Kiểm tra bridge công khai</button>
+        </div>
+        <p class="note" id="live-note"></p>
+        <p class="note" id="live-path"></p>
+      </div>
+    </section>
     <section id="logs" class="panel">
       <div class="card">
         <h2>Nhật ký sự kiện</h2>
@@ -221,12 +301,17 @@
     </section>
     <section id="settings" class="panel">
       <div class="card">
-        <h2>AUTO DEMO 10 người xem</h2>
+        <h2>AUTO DEMO người xem</h2>
         <div class="row">
+          <select id="auto-demo-viewers">
+            <option value="10" selected>10 người xem</option>
+            <option value="100">100 người xem</option>
+            <option value="500">500 người xem</option>
+          </select>
           <button type="button" class="gold" id="auto-demo-start">Chạy AUTO DEMO</button>
           <button type="button" class="danger" id="auto-demo-stop">Dừng AUTO DEMO</button>
         </div>
-        <p class="note" id="auto-demo-note">Chuỗi mock tự chạy trên bridge: 10 viewer, 500 tim, /câu, /giật, /vitri, quà 20 và 30 xu, đủ 5 cấp mồi. Không nối TikTok thật và không bật HTTP Roblox.</p>
+        <p class="note" id="auto-demo-note">Bridge chỉ nhận đúng 10, 100 hoặc 500 người xem. Chuỗi mock tự chạy: 500 tim, /câu, /giật, /vitri, quà 20 và 30 xu, đủ 5 cấp mồi. Chỉ 10 người mỗi vòng xuất hiện cùng lúc, phần còn lại chờ join. Không nối TikTok thật và không bật HTTP Roblox.</p>
         <p class="feedback" id="auto-demo-feedback"></p>
       </div>
       <div class="card">

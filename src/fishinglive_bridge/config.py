@@ -2,9 +2,50 @@
 
 from __future__ import annotations
 
+import json
 import os
 from dataclasses import dataclass
 from pathlib import Path
+
+LIVE_SETTINGS_DEFAULT = "data/live-settings.json"
+USERNAME_CHARS = set("abcdefghijklmnopqrstuvwxyz0123456789._")
+
+
+def normalize_username(value: object) -> str:
+    """Return a valid TikTok handle (lowercase, no @) or an empty string."""
+    if not isinstance(value, str):
+        return ""
+    name = value.strip().lstrip("@").lower()
+    if 2 <= len(name) <= 24 and set(name) <= USERNAME_CHARS:
+        return name
+    return ""
+
+
+def read_live_settings(path: Path) -> dict[str, object]:
+    """Draft saved by the host page. Contains no secrets, only operator choices."""
+    try:
+        if not path.is_file():
+            return {}
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    if not isinstance(data, dict):
+        return {}
+    clean: dict[str, object] = {}
+    username = normalize_username(data.get("tiktokUsername"))
+    if username:
+        clean["tiktokUsername"] = username
+    mode = data.get("mode")
+    if mode in {"mock", "live"}:
+        clean["mode"] = mode
+    bridge_url = data.get("bridgeUrl")
+    if isinstance(bridge_url, str) and (bridge_url.startswith("https://") or bridge_url.startswith("http://")) and len(bridge_url) <= 200:
+        clean["bridgeUrl"] = bridge_url.rstrip("/")
+    updated = data.get("updatedAt")
+    if isinstance(updated, str) and len(updated) <= 40:
+        clean["updatedAt"] = updated
+    return clean
+
 
 
 def load_dotenv(path: Path) -> None:
@@ -50,6 +91,8 @@ class Settings:
     journal_path: str = ""
     outbox_path: str = ""
     outbox_ttl: float = 1800.0
+    # Draft saved by the host page. Applied only when BRIDGE_SAVED_SETTINGS=1.
+    live_settings_path: str = LIVE_SETTINGS_DEFAULT
 
     @property
     def live(self) -> bool:
@@ -72,6 +115,14 @@ def load_settings(env_file: Path | None = None) -> Settings:
     mode = os.environ.get("BRIDGE_MODE", "mock").strip().lower()
     if mode not in {"mock", "live"}:
         raise RuntimeError("BRIDGE_MODE must be mock or live")
+    settings_path = os.environ.get("BRIDGE_SETTINGS_PATH", LIVE_SETTINGS_DEFAULT).strip() or LIVE_SETTINGS_DEFAULT
+    # The host page only writes a draft. It is applied on the next start when the
+    # operator opts in, and a saved mode never turns LIVE on by itself.
+    draft = read_live_settings(Path(settings_path)) if os.environ.get("BRIDGE_SAVED_SETTINGS", "").strip() == "1" else {}
+    username = os.environ.get("TIKTOK_USERNAME", "").strip().lstrip("@")
+    if not username and isinstance(draft.get("tiktokUsername"), str):
+        username = str(draft["tiktokUsername"])
+
     default_host = "0.0.0.0" if on_render else "127.0.0.1"
     host = os.environ.get("BRIDGE_HOST", default_host).strip() or default_host
     port = int(os.environ.get("BRIDGE_PORT") or (os.environ.get("PORT", "10000") if on_render else "8787"))
@@ -82,6 +133,8 @@ def load_settings(env_file: Path | None = None) -> Settings:
     # The mirror exists because the local host page binds 127.0.0.1 while Roblox can only
     # reach the public bridge. Live mode already ingests into this same queue, so it is off.
     mirror_url = os.environ.get("BRIDGE_MIRROR_URL", "").strip().rstrip("/")
+    if not mirror_url and isinstance(draft.get("bridgeUrl"), str):
+        mirror_url = str(draft["bridgeUrl"]).rstrip("/")
     mirror_key = os.environ.get("BRIDGE_MIRROR_INGEST_KEY", "").strip()
     if mode == "live":
         mirror_url = ""
@@ -101,7 +154,7 @@ def load_settings(env_file: Path | None = None) -> Settings:
         queue_path=Path(os.environ.get("BRIDGE_QUEUE_PATH", "data/queue.json")),
         ssl_cert=ssl_cert,
         ssl_key=ssl_key,
-        tiktok_username=os.environ.get("TIKTOK_USERNAME", "").strip().lstrip("@"),
+        tiktok_username=username,
         session_id=os.environ.get("TIKTOK_SESSION_ID", "").strip(),
         target_idc=os.environ.get("TIKTOK_TARGET_IDC", "").strip(),
         mirror_url=mirror_url,
@@ -109,6 +162,7 @@ def load_settings(env_file: Path | None = None) -> Settings:
         journal_path=os.environ.get("BRIDGE_JOURNAL_PATH", "data/queue-journal.sqlite3").strip(),
         outbox_path=os.environ.get("BRIDGE_OUTBOX_PATH", "data/mirror-outbox.sqlite3").strip(),
         outbox_ttl=float(os.environ.get("BRIDGE_OUTBOX_TTL") or 1800.0),
+        live_settings_path=settings_path,
     )
     if settings.live and not settings.tiktok_username:
         raise RuntimeError("TIKTOK_USERNAME is required in live mode")

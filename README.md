@@ -14,6 +14,8 @@ python -m pip install -r requirements.txt
 Copy-Item .env.example .env
 ```
 
+Chạy nhanh trên máy này: bấm đúp `Run.bat`. File đó tự dò Python còn chạy được (`.venv313` → `.venv` → `py -3` → `python.exe`) và chỉ nhận interpreter import được `fastapi` + `uvicorn`. Thư mục `.venv313` hiện là bản copy từ máy khác (`C:\Users\ctytp\...\Python313` không còn), nên `python.exe` trong đó báo `did not find executable`; `Run.bat` bỏ qua nó và dùng `.venv`. Có thể xóa `.venv313` nếu không cần.
+
 Mở `.env` và đặt hai khóa riêng, mỗi khóa ít nhất 16 ký tự:
 
 - `BRIDGE_INGEST_KEY`: chỉ process Python dùng để đẩy sự kiện vào hàng đợi.
@@ -98,6 +100,17 @@ Bật Game Settings → Security → Allow HTTP Requests chỉ sau khi bạn ph�
 - Không gọi `send_room_chat`.
 
 `TIKTOK_SESSION_ID` và `TIKTOK_TARGET_IDC` chỉ dùng khi `BRIDGE_MODE=live`. Project không đặt biến `WHITELIST_AUTHENTICATED_SESSION_ID_HOST`. Log của bridge thay khóa và session bằng `***`.
+
+## Đổi kênh LIVE khi bridge đang chạy (1.4.0)
+
+Bridge `BRIDGE_MODE=live` đổi được tài khoản mà không cần redeploy:
+
+- `GET /v1/tiktok` (header `X-Bridge-Key` = ingest key) trả `username`, `connected`, `lastError`, `hasSession`, `switches`. Không trả session.
+- `POST /v1/tiktok/switch` body `{ "username": "...", "sessionId": "...", "targetIdc": "..." }` (cùng header).
+  - `sessionId` + `targetIdc` chỉ giữ trong RAM, không ghi log, không trả lại.
+  - Để trống `sessionId` = giữ session hiện tại (đổi username cùng tài khoản). Muốn bỏ session thì sửa `.env`/Render rồi restart.
+  - Nhập session mà thiếu `targetIdc` → 422.
+- Trang `/host` local có nút **Đổi kênh trên Render** (panel LIVE): trình duyệt gọi local `/host/action` → local gọi Render bằng `BRIDGE_MIRROR_URL` + ingest key. Nhờ vậy khóa không bao giờ xuống trình duyệt và không cần mở Render dashboard.
 
 ## Hosting khi bạn muốn công khai
 

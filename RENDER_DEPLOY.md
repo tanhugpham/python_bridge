@@ -20,7 +20,16 @@ Add environment variables privately in Render Dashboard > Service > Environment:
 
 **Do not** set `BRIDGE_HOST`, `BRIDGE_PORT`, `BRIDGE_SSL_CERT`, or `BRIDGE_SSL_KEY` on Render. The code detects Render via its platform-provided `RENDER=true`, binds to `0.0.0.0`, and reads the platform's `PORT` (default 10000). Render provides public HTTPS; the app's internal listener uses HTTP.
 
-Keep TikTok credentials empty. Do not switch `BRIDGE_MODE` to `live` without explicit approval.
+Keep TikTok credentials empty for mock. `BRIDGE_MODE=live` is now supported (1.4.0) with these extra variables:
+
+| Name | Value |
+| --- | --- |
+| `BRIDGE_MODE` | `live` |
+| `TIKTOK_USERNAME` | the live account handle (no `@`) |
+| `TIKTOK_SESSION_ID` | `sessionid` cookie value (optional but usually required) |
+| `TIKTOK_TARGET_IDC` | `tt-target-idc` that came with the session |
+
+The listener can be switched at runtime without a redeploy: `POST /v1/tiktok/switch` with the ingest key and `{username, sessionId, targetIdc}`; `GET /v1/tiktok` returns the state (never the session). The local `/host` page proxies the same call through `BRIDGE_MIRROR_URL`, so the browser never holds a key. Live mode disables the mirror, so Roblox must poll this service directly.
 
 Once deployed, open `https://<service-name>.onrender.com/v1/health`; the response should be 200. Test that unauthenticated `GET /v1/events` receives 401 and `/host` and `/control` return 404. Do not expose ingest credentials in HTML or browser JavaScript.
 

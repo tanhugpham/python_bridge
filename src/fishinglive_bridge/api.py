@@ -11,7 +11,7 @@ from fastapi.responses import FileResponse, JSONResponse
 
 from fishinglive_bridge import __version__
 from fishinglive_bridge.avatar_cache import AvatarCache
-from fishinglive_bridge.config import Settings
+from fishinglive_bridge.config import Settings, normalize_username
 from fishinglive_bridge.host_state import HostState, host_allowed, origin_allowed
 from fishinglive_bridge.queue_store import EventQueue
 
@@ -39,10 +39,12 @@ def create_app(
     control_dir: Path | None = None,
     host_dir: Path | None = None,
     mirror=None,
+    live=None,
 ) -> FastAPI:
     app = FastAPI(title="FishingLive Bridge", docs_url=None, redoc_url=None, openapi_url=None, lifespan=lifespan)
     host = HostState(queue, settings, mirror)
     app.state.host = host
+    app.state.live = live
 
     def require_ingest(x_bridge_key: str = Header(default="")) -> None:
         # Ingest stays on X-Bridge-Key. x-api-key is the Roblox read header only.
@@ -60,6 +62,20 @@ def create_app(
         if not presented or any(not _keys_match(value, settings.read_key) for value in presented):
             raise HTTPException(status_code=401, detail="unauthorized")
 
+    def require_bridge_key(
+        x_bridge_key: str = Header(default=""),
+        x_api_key: str = Header(default=""),
+    ) -> None:
+        # Read-only telemetry. The host page reaches the public bridge through the
+        # mirror, which already holds that bridge's ingest key, so either secret may
+        # ask. Events keep the stricter require_read / require_ingest below.
+        presented = [value for value in (x_bridge_key, x_api_key) if value]
+        allowed = (settings.read_key, settings.ingest_key)
+        for key in allowed:
+            if presented and all(_keys_match(value, key) for value in presented):
+                return
+        raise HTTPException(status_code=401, detail="unauthorized")
+
     @app.get("/v1/health")
     def health() -> dict[str, Any]:
         state = queue.status()
@@ -72,6 +88,41 @@ def create_app(
             "durable": state["durable"],
             "ackCursor": state["ackCursor"],
         }
+
+    @app.get("/v1/tiktok", dependencies=[Depends(require_ingest)])
+    def tiktok_status() -> dict[str, Any]:
+        """Authenticated view of the live listener. Never returns a session value."""
+        if not settings.live:
+            return {"ok": True, "mode": settings.mode, "live": False, "note": "mock mode: TikTok client is not started"}
+        if live is None:
+            return {"ok": False, "mode": settings.mode, "live": True, "note": "live source is not running"}
+        return {"ok": True, "mode": settings.mode, "live": True, **live.status()}
+
+    @app.post("/v1/tiktok/switch", dependencies=[Depends(require_ingest)])
+    def tiktok_switch(body: dict[str, Any]) -> dict[str, Any]:
+        """Switch the live room at runtime (no redeploy). Session stays in memory only."""
+        if not settings.live:
+            raise HTTPException(status_code=409, detail="live_mode_required")
+        if live is None:
+            raise HTTPException(status_code=503, detail="live_source_unavailable")
+        username = normalize_username(body.get("username", body.get("tiktokUsername")))
+        if not username:
+            raise HTTPException(status_code=422, detail="invalid_username")
+        session_id = body.get("sessionId", body.get("session_id", ""))
+        target_idc = body.get("targetIdc", body.get("target_idc", ""))
+        if not isinstance(session_id, str) or not isinstance(target_idc, str):
+            raise HTTPException(status_code=422, detail="invalid_session")
+        session_id = session_id.strip()
+        target_idc = target_idc.strip()
+        if session_id and not target_idc:
+            raise HTTPException(status_code=422, detail="target_idc_required")
+        if len(session_id) > 4096 or len(target_idc) > 32:
+            raise HTTPException(status_code=422, detail="invalid_session")
+        try:
+            state = live.apply(username, session_id, target_idc)
+        except ValueError as error:
+            raise HTTPException(status_code=422, detail=str(error)) from error
+        return {"ok": True, **state}
 
     @app.post("/v1/events", dependencies=[Depends(require_ingest)])
     def ingest(body: dict[str, Any]) -> dict[str, Any]:
@@ -136,9 +187,27 @@ def create_app(
         status, removed = queue.ack(sequences)
         if status == "rate_limited":
             raise HTTPException(status_code=429, detail="rate_limited")
+        # Roblox rides its FPS/RAM snapshot on this existing ACK call. Unknown or
+        # out-of-range fields are dropped, never echoed back.
+        telemetry = body.get("telemetry")
+        if isinstance(telemetry, dict):
+            host.telemetry.update(telemetry)
         if removed:
             host.note_ack(sequences)
         return {"acked": removed}
+
+    @app.get("/v1/telemetry", dependencies=[Depends(require_bridge_key)])
+    def telemetry() -> dict[str, Any]:
+        state = queue.status()
+        return {
+            **host.telemetry.get(),
+            "version": __version__,
+            "sessionId": state["sessionId"],
+            "resetEpoch": state["resetEpoch"],
+            "depth": state["depth"],
+            "ackCursor": state["ackCursor"],
+            "lastAckAt": state["lastAckAt"],
+        }
 
     @app.post("/v1/session/reset", dependencies=[Depends(require_ingest)])
     def reset_session(body: dict[str, Any]) -> dict[str, Any]:
@@ -306,6 +375,30 @@ def create_app(
     def host_auto_demo(request: Request) -> dict[str, Any]:
         require_host_page(request)
         return host.dashboard()["autoDemo"]
+
+    @app.get("/host/report")
+    def host_report(request: Request) -> dict[str, Any]:
+        require_host_page(request)
+        return {"ok": True, "report": host.report}
+
+    @app.get("/host/live-settings")
+    def host_live_settings(request: Request) -> dict[str, Any]:
+        require_host_page(request)
+        return host.live_settings()
+
+    @app.get("/host/telemetry")
+    def host_telemetry(request: Request) -> dict[str, Any]:
+        require_host_page(request)
+        board = host.dashboard()
+        return {
+            "ok": True,
+            "source": board["roblox"]["telemetrySource"],
+            "ageSeconds": board["roblox"]["telemetryAgeSeconds"],
+            "fresh": board["roblox"]["telemetryFresh"],
+            "note": board["roblox"]["telemetryNote"],
+            "telemetry": board["roblox"]["telemetry"],
+            "render": board["render"],
+        }
 
     @app.post("/host/action")
     def host_action(body: dict[str, Any], request: Request) -> dict[str, Any]:
