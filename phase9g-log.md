@@ -1,6 +1,5 @@
 # PHASE 9G log — Render deploy, MOCK HTML→Render→Roblox, stress 100–500 viewer
 
-
 ## 0. Kết luận — mọi mục PASS, số liệu lấy từ Play thật
 
 | Yêu cầu | Kết quả | Bằng chứng (mục) |
@@ -125,7 +124,7 @@ Client FPS note: with the Studio window unfocused the client throttles to ~14.7 
 
 ## 8. Defects found and fixed in this phase
 
-1. **Stress/join events bypassed the mirror.** `HostState._stress_loop` called `queue.publish` directly, so the first stress run put 900 events in the local queue while `mirror.sent` stayed at 128 and Roblox saw nothing. Fixed in `1.2.0` by routing every publish through `HostState._deliver()` (publish + log + mirror). Regression test: `test_stress_join_is_mirrored`.
+1. **Stress/join events bypassed the mirror.** `HostState._stress_loop` called `queue.publish` directly, so the first stress run put 900 events in the local queue while `mirror.sent` stayed at 128 and Roblox saw nothing (`phase9g-out/stress.json`, `stress-500.png`, `stress-final.png`). Fixed in `1.2.0` by routing every publish through `HostState._deliver()` (publish + log + mirror). Regression test: `test_stress_join_is_mirrored`.
 2. **Render ingest gate.** `/v1/events` admits 60 rows/s per process; an un-paced mirror would drop rows as `rate_limited`. The mirror now sends one ≤20-row batch per 0.35 s while its outbox is non-empty and counts `rejected` rows, so the 500-viewer burst finished with `rejected=0`.
 3. **False "ROBLOX DISCONNECTED" pill.** In mirror mode Roblox polls Render, so the local process never sees a pull. The page now shows `ROBLOX QUA RENDER` (warn) and a banner that says the local process cannot measure that connection.
 4. Driver-side only: PowerShell 5.1 encodes a string body as ISO-8859-1, so Vietnamese text produced HTTP 400 `There was an error parsing the body`. Drivers now send explicit UTF-8 bytes (`phase9g-e2e.ps1`, `phase9g-act.ps1`). Not a bridge defect.
