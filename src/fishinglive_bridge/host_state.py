@@ -1207,8 +1207,7 @@ class HostState:
                     duplicate_event = event
                 elif kind == "duplicate":
                     event = duplicate_event
-                status, sequence = self.queue.publish(event, rate_limit=False)
-                self.observe_publish(event, status, sequence, "normal" if kind == "gifts100" else None)
+                status, sequence = self._deliver(event, "normal" if kind == "gifts100" else None)
                 if status == "created":
                     sent += 1
                 elif status == "duplicate" and kind == "duplicate":
@@ -1278,16 +1277,20 @@ class HostState:
             return self._event("like", "stress_dup", "stress_dup", {"count": 1}, "stress-dup-fixed")
         return self._event("comment", "stress_fill", "stress_fill", {"text": "xin chao"}, None)
 
+    def _deliver(self, event: dict[str, Any], purpose: str | None = None) -> tuple[str, int | None]:
+        """Publish locally, log the outcome, and copy the event to the public bridge."""
+        status, sequence = self.queue.publish(event, rate_limit=False)
+        self.observe_publish(event, status, sequence, purpose)
+        if self.mirror is not None and status in MIRRORED_STATUSES:
+            self.mirror.submit(event)
+        return status, sequence
+
     def _publish(self, event: dict[str, Any], purpose: str | None = None) -> dict[str, Any]:
         protected = _protected_text(event)
         if self.queue.status()["depth"] >= self.queue.capacity and protected:
             self.observe_publish(event, "overloaded", None, purpose)
             return self._result("FAILED", "NOT_DELIVERED", None, event["eventId"], "Hàng đợi đã đầy. Không xếp thêm sự kiện được bảo vệ.")
-        status, sequence = self.queue.publish(event, rate_limit=False)
-        self.observe_publish(event, status, sequence, purpose)
-        if self.mirror is not None and status in MIRRORED_STATUSES:
-            # Roblox polls the public bridge, not this loopback process.
-            self.mirror.submit(event)
+        status, sequence = self._deliver(event, purpose)
         if status == "created":
             return self._result("QUEUED", "CHƯA KÉO", sequence, event["eventId"], "Bridge đã xếp sự kiện. Roblox chưa ACK.")
         if status == "coalesced":

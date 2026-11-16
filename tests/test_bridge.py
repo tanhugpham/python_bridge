@@ -776,7 +776,31 @@ class MirrorTests(unittest.TestCase):
             app = create_app(self.mirror_settings(Path(folder)), EventQueue())
             health = TestClient(app).get("/v1/health").json()
         self.assertTrue(health["ok"])
-        self.assertEqual(health["version"], "1.1.0")
+        self.assertEqual(health["version"], "1.2.0")
+
+    def test_stress_join_is_mirrored(self) -> None:
+        posted: list[dict] = []
+
+        def post(url, key, payload, timeout):
+            posted.extend(payload["events"])
+            return 200, json.dumps({"results": [{"status": "created"} for _ in payload["events"]]})
+
+        mirror = UpstreamMirror("https://python-bridge.invalid", INGEST, post=post)
+        try:
+            with tempfile.TemporaryDirectory() as folder:
+                host = HostState(EventQueue(), self.mirror_settings(Path(folder)), mirror)
+                host.start_stress("join10", 0.0)
+                deadline = time.time() + 10
+                while time.time() < deadline and host.stress["running"]:
+                    time.sleep(0.05)
+                self.assertTrue(mirror.wait_idle(5.0))
+                sent = host.stress["sent"]
+                queued = host.queue.status()["depth"]
+        finally:
+            mirror.close()
+        self.assertEqual(sent, 10)
+        self.assertEqual(queued, 10)
+        self.assertGreaterEqual(len(posted), 10)
 
 
 

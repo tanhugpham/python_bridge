@@ -23,6 +23,7 @@ MIRROR_BATCH = 20
 MIRROR_OUTBOX = 4000
 MIRROR_TIMEOUT = 10.0
 MIRROR_RETRIES = 2
+MIRROR_PACE = 0.35
 LATENCY_SAMPLES = 200
 MIRRORED_STATUSES = {"created", "coalesced", "duplicate"}
 
@@ -83,6 +84,7 @@ class UpstreamMirror:
         self.created = 0
         self.coalesced = 0
         self.duplicates = 0
+        self.rejected = 0
         self.refused = 0
         self.failed = 0
         self.failures = 0
@@ -112,6 +114,7 @@ class UpstreamMirror:
                 "created": self.created,
                 "coalesced": self.coalesced,
                 "duplicates": self.duplicates,
+                "rejected": self.rejected,
                 "refused": self.refused,
                 "failed": self.failed,
                 "failures": self.failures,
@@ -162,6 +165,10 @@ class UpstreamMirror:
             rows = self._take()
             if rows:
                 self._send(rows)
+                if not self.stop.is_set() and self.outbox:
+                    # Render accepts 60 ingest rows per second; one 20-row batch per
+                    # 0.35 s keeps a burst (500 viewers) under that gate.
+                    self.stop.wait(MIRROR_PACE)
 
     def _send(self, rows: list[dict[str, Any]]) -> None:
         payload = {"events": rows}
@@ -175,13 +182,14 @@ class UpstreamMirror:
                 status, text = 0, str(error)
             elapsed = (self.now() - started) * 1000.0
             if status == 200:
-                created, coalesced, duplicates = self._tally(text, len(rows))
+                created, coalesced, duplicates, rejected = self._tally(text, len(rows))
                 with self.lock:
                     self.batches += 1
                     self.sent += len(rows)
                     self.created += created
                     self.coalesced += coalesced
                     self.duplicates += duplicates
+                    self.rejected += rejected
                     self.last_latency = elapsed
                     self.latencies.append(elapsed)
                     self.last_error = ""
@@ -195,15 +203,15 @@ class UpstreamMirror:
                 self.last_error = (text or "http_%s" % status)[:160]
             return
 
-    def _tally(self, text: str, fallback: int) -> tuple[int, int, int]:
-        """Count created / coalesced / duplicate rows in the ingest reply."""
+    def _tally(self, text: str, fallback: int) -> tuple[int, int, int, int]:
+        """Count created / coalesced / duplicate / rejected rows in the ingest reply."""
         try:
             results = json.loads(text).get("results")
         except Exception:
             results = None
         if not isinstance(results, list):
-            return fallback, 0, 0
-        created = coalesced = duplicates = 0
+            return fallback, 0, 0, 0
+        created = coalesced = duplicates = rejected = 0
         for row in results:
             status = row.get("status") if isinstance(row, dict) else None
             if status == "created":
@@ -212,4 +220,6 @@ class UpstreamMirror:
                 coalesced += 1
             elif status == "duplicate":
                 duplicates += 1
-        return created, coalesced, duplicates
+            else:
+                rejected += 1
+        return created, coalesced, duplicates, rejected

@@ -1,0 +1,9 @@
+{
+  "out": "phase9g-out/auto-demo-b.json",
+  "steps": [
+    { "op": "click", "id": "auto-demo-stop", "waitMs": 2500 },
+    { "op": "eval", "label": "feedback-stop", "expr": "document.getElementById('auto-demo-feedback').textContent" },
+    { "op": "eval", "label": "dashboard-json", "expr": "fetch('/host/dashboard').then(function(r){return r.json();}).then(function(b){return JSON.stringify({mirror:b.mirror, autoDemo:b.autoDemo, viewers:b.viewers, totalLikes:b.totalLikes, totalGifts:b.totalGifts, depth:b.bridge.depth, accepted:b.bridge.accepted, duplicates:b.bridge.duplicates});})" },
+    { "op": "shot", "path": "phase9g-out/auto-demo-b.png" }
+  ]
+}

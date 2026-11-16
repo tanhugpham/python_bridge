@@ -1,0 +1,8 @@
+2026-11-16 12:14:05,906 INFO fishinglive_bridge mirror: republishing host-controller events to https://python-bridge-6v9w.onrender.com
+2026-11-16 12:14:05,908 INFO fishinglive_bridge control center on http://127.0.0.1:8787/control
+2026-11-16 12:14:05,909 INFO fishinglive_bridge host controller on http://127.0.0.1:8787/host
+INFO:     Started server process [17108]
+INFO:     Waiting for application startup.
+2026-11-16 12:14:05,976 INFO fishinglive_bridge mock mode: TikTok client is not started
+INFO:     Application startup complete.
+INFO:     Uvicorn running on http://127.0.0.1:8787 (Press CTRL+C to quit)

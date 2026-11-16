@@ -1,0 +1,15 @@
+{
+  "out": "phase9g-out/stress.json",
+  "steps": [
+    { "op": "clickText", "scope": "#stress-row", "text": "100 viewer JOIN", "waitMs": 12000 },
+    { "op": "eval", "label": "after-join100", "expr": "fetch('/host/dashboard').then(function(r){return r.json();}).then(function(b){return JSON.stringify({viewers:b.viewers, depth:b.bridge.depth, accepted:b.bridge.accepted, mirror:{queued:b.mirror.queued,sent:b.mirror.sent,failed:b.mirror.failed,lat:b.mirror.latencyMs}, stress:b.stress});})" },
+    { "op": "clickText", "scope": "#stress-row", "text": "500 viewer JOIN", "waitMs": 45000 },
+    { "op": "eval", "label": "after-join500", "expr": "fetch('/host/dashboard').then(function(r){return r.json();}).then(function(b){return JSON.stringify({viewers:b.viewers, depth:b.bridge.depth, accepted:b.bridge.accepted, mirror:{queued:b.mirror.queued,sent:b.mirror.sent,failed:b.mirror.failed,lat:b.mirror.latencyMs}, stress:b.stress});})" },
+    { "op": "shot", "path": "phase9g-out/stress-500.png" },
+    { "op": "clickText", "scope": "#stress-row", "text": "100 like", "waitMs": 12000 },
+    { "op": "clickText", "scope": "#stress-row", "text": "100 /giật", "waitMs": 12000 },
+    { "op": "clickText", "scope": "#stress-row", "text": "100 quà mock", "waitMs": 15000 },
+    { "op": "eval", "label": "final", "expr": "fetch('/host/dashboard').then(function(r){return r.json();}).then(function(b){return JSON.stringify({viewers:b.viewers, depth:b.bridge.depth, accepted:b.bridge.accepted, dropped:b.bridge.dropped, duplicates:b.bridge.duplicates, totalLikes:b.totalLikes, totalGifts:b.totalGifts, mirror:b.mirror, stress:b.stress, process:b.process});})" },
+    { "op": "shot", "path": "phase9g-out/stress-final.png" }
+  ]
+}

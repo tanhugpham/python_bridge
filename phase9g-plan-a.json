@@ -1,0 +1,16 @@
+{
+  "out": "phase9g-out/auto-demo-a.json",
+  "steps": [
+    { "op": "navigate", "url": "http://127.0.0.1:8787/host", "waitMs": 2500 },
+    { "op": "eval", "label": "title", "expr": "document.getElementById('title').textContent" },
+    { "op": "eval", "label": "pills", "expr": "document.getElementById('pills').innerText" },
+    { "op": "eval", "label": "cards-before", "expr": "document.getElementById('cards').innerText" },
+    { "op": "eval", "label": "mirror-json", "expr": "fetch('/host/dashboard').then(function(r){return r.json();}).then(function(b){return JSON.stringify(b.mirror);})" },
+    { "op": "click", "id": "auto-demo-start", "waitMs": 2000 },
+    { "op": "eval", "label": "feedback-start", "expr": "document.getElementById('auto-demo-feedback').textContent" },
+    { "op": "waitFor", "expr": "document.getElementById('auto-demo-feedback').textContent", "contains": "vòng 2", "timeoutMs": 120000 },
+    { "op": "eval", "label": "feedback-wave2", "expr": "document.getElementById('auto-demo-feedback').textContent" },
+    { "op": "eval", "label": "dashboard-json", "expr": "fetch('/host/dashboard').then(function(r){return r.json();}).then(function(b){return JSON.stringify({mirror:b.mirror, autoDemo:b.autoDemo, viewers:b.viewers, totalLikes:b.totalLikes, totalGifts:b.totalGifts, roblox:b.roblox.label, depth:b.bridge.depth});})" },
+    { "op": "shot", "path": "phase9g-out/auto-demo-a.png" }
+  ]
+}
