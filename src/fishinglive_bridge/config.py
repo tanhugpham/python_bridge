@@ -46,6 +46,10 @@ class Settings:
     # Mock-only: republish local host-controller events to the bridge Roblox polls.
     mirror_url: str = ""
     mirror_key: str = ""
+    # Durable state. Empty disables the journal and keeps the queue in memory.
+    journal_path: str = ""
+    outbox_path: str = ""
+    outbox_ttl: float = 1800.0
 
     @property
     def live(self) -> bool:
@@ -102,6 +106,9 @@ def load_settings(env_file: Path | None = None) -> Settings:
         target_idc=os.environ.get("TIKTOK_TARGET_IDC", "").strip(),
         mirror_url=mirror_url,
         mirror_key=mirror_key,
+        journal_path=os.environ.get("BRIDGE_JOURNAL_PATH", "data/queue-journal.sqlite3").strip(),
+        outbox_path=os.environ.get("BRIDGE_OUTBOX_PATH", "data/mirror-outbox.sqlite3").strip(),
+        outbox_ttl=float(os.environ.get("BRIDGE_OUTBOX_TTL") or 1800.0),
     )
     if settings.live and not settings.tiktok_username:
         raise RuntimeError("TIKTOK_USERNAME is required in live mode")

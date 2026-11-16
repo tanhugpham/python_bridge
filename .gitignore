@@ -8,3 +8,5 @@ probe.log
 phase9*-out/
 phase9*-pytest.txt
 phase9*-node.txt
+phase9h-proxy.out.txt
+phase9h-proxy.err.txt

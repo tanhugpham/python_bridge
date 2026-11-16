@@ -776,7 +776,7 @@ class MirrorTests(unittest.TestCase):
             app = create_app(self.mirror_settings(Path(folder)), EventQueue())
             health = TestClient(app).get("/v1/health").json()
         self.assertTrue(health["ok"])
-        self.assertEqual(health["version"], "1.2.0")
+        self.assertEqual(health["version"], "1.3.0")
 
     def test_stress_join_is_mirrored(self) -> None:
         posted: list[dict] = []
@@ -806,6 +806,337 @@ class MirrorTests(unittest.TestCase):
 
 
 
+
+
+class SimBridge:
+    """In-process stand-in for the deployed bridge: ingest plus the ack history."""
+
+    def __init__(self, queue: EventQueue) -> None:
+        self.queue = queue
+        self.down = False
+        self.posts = 0
+        self.posted_ids: list[str] = []
+
+    def post(self, url: str, key: str, payload: dict, timeout: float) -> tuple[int, str]:
+        if self.down:
+            raise OSError("sim offline")
+        self.posts += 1
+        results = []
+        for event in payload["events"]:
+            status, sequence = self.queue.publish(event, rate_limit=False)
+            results.append({"status": status, "sequence": sequence})
+            self.posted_ids.append(event["eventId"])
+        state = self.queue.status()
+        body = {
+            "results": results,
+            "sessionId": state["sessionId"],
+            "resetEpoch": state["resetEpoch"],
+            "depth": state["depth"],
+        }
+        return 200, json.dumps(body)
+
+    def fetch(self, url: str, key: str, after: int, timeout: float) -> tuple[int, str]:
+        if self.down:
+            raise OSError("sim offline")
+        journal = self.queue.journal
+        if journal is None:
+            state = self.queue.status()
+            body = {
+                "after": after,
+                "next": after,
+                "ids": [],
+                "sessionId": state["sessionId"],
+                "resetEpoch": state["resetEpoch"],
+            }
+        else:
+            body = journal.acks_after(after, 200)
+        return 200, json.dumps(body)
+
+    def roblox(self, limit: int = 20) -> list[int]:
+        """One poll cycle: pull a batch, process it, ack it."""
+        status, rows = self.queue.pull(limit)
+        sequences = [row["sequence"] for row in rows]
+        if sequences:
+            self.queue.ack(sequences)
+        return sequences
+
+
+class DurabilityTests(unittest.TestCase):
+    """Phase 9H: a restart, a redeploy or a 30-120 s outage must not lose or repeat events."""
+
+    def sample(self, index: int) -> dict:
+        return {
+            "eventId": "durable-%03d" % index,
+            "type": "like",
+            "viewerId": "dv%03d" % index,
+            "nickname": "dv%03d" % index,
+            "timestamp": 2000 + index,
+            "payload": {"count": 1},
+        }
+
+    def wait_for(self, check, timeout: float) -> bool:
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            if check():
+                return True
+            time.sleep(0.02)
+        return check()
+
+    def test_journal_keeps_queue_and_session_across_restart(self) -> None:
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / "queue.sqlite3"
+            first = EventQueue(journal_path=path)
+            created = []
+            for event in join_batch():
+                status, sequence = first.publish(event, rate_limit=False)
+                self.assertEqual(status, "created")
+                created.append(sequence)
+            session = first.status()["sessionId"]
+            self.assertTrue(first.durable)
+            first.journal.close()
+
+            second = EventQueue(journal_path=path)
+            state = second.status()
+            self.assertEqual(state["sessionId"], session)
+            self.assertEqual(state["depth"], 15)
+            self.assertEqual(state["recovered"], 15)
+            self.assertEqual([row["sequence"] for row in second.pull(20)[1]], created)
+            self.assertEqual(second.publish(join_batch()[0], rate_limit=False)[0], "duplicate")
+            fresh = {
+                "eventId": "after-restart-1",
+                "type": "comment",
+                "viewerId": "v-99",
+                "nickname": "Khách 99",
+                "timestamp": 1_700_000_500,
+                "payload": {"text": "/câu"},
+            }
+            status, sequence = second.publish(fresh, rate_limit=False)
+            self.assertEqual(status, "created")
+            self.assertEqual(sequence, 16)
+            self.assertEqual(second.ack(created)[1], 15)
+            rows = second.pull(20)[1]
+            self.assertEqual([row["sequence"] for row in rows], [16])
+            self.assertEqual(second.status()["acked"], 15)
+            second.journal.close()
+
+    def test_ack_history_and_reset_epoch(self) -> None:
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / "queue.sqlite3"
+            queue = EventQueue(journal_path=path)
+            sequences = [queue.publish(event, rate_limit=False)[1] for event in interaction_batch()]
+            queue.ack(sequences[:2])
+            answer = queue.journal.acks_after(0, 200)
+            self.assertEqual(len(answer["ids"]), 2)
+            self.assertEqual(answer["next"], 2)
+            self.assertEqual(answer["cursor"], 2)
+            self.assertEqual(queue.journal.acks_after(2, 200)["ids"], [])
+            session = queue.reset()
+            state = queue.status()
+            self.assertEqual(state["resetEpoch"], 1)
+            self.assertEqual(state["depth"], 0)
+            self.assertEqual(queue.journal.acks_after(0, 200)["ids"], [])
+            queue.journal.close()
+
+            reopened = EventQueue(journal_path=path)
+            self.assertEqual(reopened.status()["sessionId"], session)
+            self.assertEqual(reopened.status()["resetEpoch"], 1)
+            reopened.journal.close()
+
+    def test_journal_files_hold_no_secrets(self) -> None:
+        with tempfile.TemporaryDirectory() as folder:
+            queue_path = Path(folder) / "queue.sqlite3"
+            outbox_path = Path(folder) / "outbox.sqlite3"
+            queue = EventQueue(journal_path=queue_path)
+            for event in interaction_batch():
+                queue.publish(event, rate_limit=False)
+            sim = SimBridge(queue)
+            mirror = UpstreamMirror(
+                "https://python-bridge.invalid",
+                INGEST,
+                post=sim.post,
+                fetch=sim.fetch,
+                outbox_path=outbox_path,
+                resend_after=60.0,
+            )
+            try:
+                mirror.submit(self.sample(1))
+                self.assertTrue(mirror.wait_idle(5.0))
+            finally:
+                mirror.close()
+            queue.journal.close()
+            for path in (queue_path, outbox_path):
+                blob = path.read_bytes()
+                self.assertNotIn(INGEST.encode("utf-8"), blob)
+                self.assertNotIn(READ.encode("utf-8"), blob)
+
+    def test_durable_mirror_survives_queue_restart(self) -> None:
+        with tempfile.TemporaryDirectory() as folder:
+            queue_path = Path(folder) / "queue.sqlite3"
+            outbox_path = Path(folder) / "outbox.sqlite3"
+            queue = EventQueue(journal_path=queue_path)
+            sim = SimBridge(queue)
+            mirror = UpstreamMirror(
+                "https://python-bridge.invalid",
+                INGEST,
+                post=sim.post,
+                fetch=sim.fetch,
+                outbox_path=outbox_path,
+                resend_after=60.0,
+            )
+            try:
+                for index in range(5):
+                    mirror.submit(self.sample(index))
+                self.assertTrue(mirror.wait_idle(5.0))
+                self.assertEqual(queue.status()["depth"], 5)
+                session = queue.status()["sessionId"]
+                mirror.close()
+                queue.journal.close()
+
+                queue = EventQueue(journal_path=queue_path)
+                sim = SimBridge(queue)
+                mirror = UpstreamMirror(
+                    "https://python-bridge.invalid",
+                    INGEST,
+                    post=sim.post,
+                    fetch=sim.fetch,
+                    outbox_path=outbox_path,
+                    resend_after=60.0,
+                )
+                self.assertEqual(queue.status()["sessionId"], session)
+                self.assertEqual(queue.status()["depth"], 5)
+                self.assertEqual(len(sim.roblox()), 5)
+                self.assertTrue(self.wait_for(lambda: mirror.status()["queued"] == 0, 8.0))
+                status = mirror.status()
+                self.assertEqual(status["acked"], 5)
+                self.assertEqual(status["failed"], 0)
+                self.assertEqual(status["expired"], 0)
+                self.assertIsNotNone(status["ackLatencyMs"])
+            finally:
+                mirror.close()
+                journal = queue.journal
+                if journal is not None:
+                    journal.close()
+
+
+    def test_durable_mirror_survives_network_loss(self) -> None:
+        with tempfile.TemporaryDirectory() as folder:
+            queue_path = Path(folder) / "queue.sqlite3"
+            outbox_path = Path(folder) / "outbox.sqlite3"
+            queue = EventQueue(journal_path=queue_path)
+            sim = SimBridge(queue)
+            sim.down = True
+            mirror = UpstreamMirror(
+                "https://python-bridge.invalid",
+                INGEST,
+                post=sim.post,
+                fetch=sim.fetch,
+                outbox_path=outbox_path,
+                resend_after=60.0,
+            )
+            try:
+                for index in range(40):
+                    mirror.submit(self.sample(index))
+                self.assertTrue(self.wait_for(lambda: mirror.status()["deferred"] > 0, 10.0))
+                offline = mirror.status()
+                self.assertEqual(offline["queued"], 40)
+                self.assertEqual(offline["sent"], 0)
+                self.assertGreaterEqual(offline["failures"], 1)
+                self.assertTrue(offline["lastError"])
+
+                sim.down = False
+                self.assertTrue(mirror.wait_idle(20.0))
+                self.assertEqual(queue.status()["depth"], 40)
+                pending = 40
+                while pending > 0:
+                    pulled = sim.roblox(20)
+                    if not pulled:
+                        break
+                    pending -= len(pulled)
+                self.assertTrue(self.wait_for(lambda: mirror.status()["queued"] == 0, 10.0))
+                status = mirror.status()
+                self.assertEqual(status["acked"], 40)
+                self.assertEqual(status["failed"], 0)
+                self.assertEqual(status["expired"], 0)
+                self.assertEqual(queue.status()["depth"], 0)
+            finally:
+                mirror.close()
+                journal = queue.journal
+                if journal is not None:
+                    journal.close()
+
+    def test_durable_mirror_replays_after_session_change(self) -> None:
+        with tempfile.TemporaryDirectory() as folder:
+            queue_path = Path(folder) / "queue.sqlite3"
+            outbox_path = Path(folder) / "outbox.sqlite3"
+            queue = EventQueue(journal_path=queue_path)
+            sim = SimBridge(queue)
+            mirror = UpstreamMirror(
+                "https://python-bridge.invalid",
+                INGEST,
+                post=sim.post,
+                fetch=sim.fetch,
+                outbox_path=outbox_path,
+                resend_after=60.0,
+            )
+            try:
+                for index in range(3):
+                    mirror.submit(self.sample(index))
+                self.assertTrue(mirror.wait_idle(5.0))
+                posts_before = sim.posts
+                queue.reset()  # a redeploy / explicit reset: memory and dedup are new
+                self.assertTrue(self.wait_for(lambda: mirror.status()["sessionChanges"] > 0, 8.0))
+                self.assertTrue(self.wait_for(lambda: sim.posts > posts_before, 8.0))
+                self.assertGreaterEqual(mirror.status()["replayed"], 1)
+                self.assertEqual(queue.status()["depth"], 3)
+                pending = 3
+                while pending > 0:
+                    pulled = sim.roblox(20)
+                    if not pulled:
+                        break
+                    pending -= len(pulled)
+                self.assertTrue(self.wait_for(lambda: mirror.status()["queued"] == 0, 10.0))
+                self.assertEqual(mirror.status()["acked"], 3)
+            finally:
+                mirror.close()
+                journal = queue.journal
+                if journal is not None:
+                    journal.close()
+
+    def test_api_reports_durability(self) -> None:
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / "queue.sqlite3"
+            queue = EventQueue(journal_path=path)
+            client = TestClient(create_app(settings(path), queue))
+            health = client.get("/v1/health").json()
+            self.assertTrue(health["durable"])
+            self.assertEqual(health["resetEpoch"], 0)
+            self.assertEqual(health["ackCursor"], 0)
+            denied = client.get("/v1/acks", headers={"X-Bridge-Key": READ})
+            self.assertEqual(denied.status_code, 401)
+            event = join_batch()[0]
+            client.post("/v1/events", headers={"X-Bridge-Key": INGEST}, json=event)
+            pulled = client.get("/v1/events", headers={"x-api-key": READ}).json()
+            self.assertEqual(pulled["resetEpoch"], 0)
+            sequences = [row["sequence"] for row in pulled["events"]]
+            client.post("/v1/events/ack", headers={"x-api-key": READ}, json={"sequences": sequences})
+            acks = client.get("/v1/acks?after=0", headers={"X-Bridge-Key": INGEST}).json()
+            self.assertEqual(acks["ids"], [event["eventId"]])
+            self.assertEqual(acks["next"], len(sequences))
+            self.assertEqual(acks["cursor"], len(sequences))
+            self.assertEqual(acks["sessionId"], health["sessionId"])
+            queue.journal.close()
+
+    def test_journal_paths_come_from_env(self) -> None:
+        env = {
+            "BRIDGE_MODE": "mock",
+            "BRIDGE_INGEST_KEY": INGEST,
+            "BRIDGE_READ_KEY": READ,
+        }
+        with patch.dict(os.environ, env, clear=True):
+            cfg = load_settings(Path("does-not-exist.env"))
+        self.assertTrue(cfg.journal_path.endswith("queue-journal.sqlite3"))
+        self.assertTrue(cfg.outbox_path.endswith("mirror-outbox.sqlite3"))
+        self.assertEqual(cfg.outbox_ttl, 1800.0)
 
 
 def logging_record(message: str):

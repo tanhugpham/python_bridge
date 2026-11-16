@@ -63,7 +63,15 @@ def create_app(
     @app.get("/v1/health")
     def health() -> dict[str, Any]:
         state = queue.status()
-        return {"ok": True, "version": __version__, "sessionId": state["sessionId"], "depth": state["depth"]}
+        return {
+            "ok": True,
+            "version": __version__,
+            "sessionId": state["sessionId"],
+            "resetEpoch": state["resetEpoch"],
+            "depth": state["depth"],
+            "durable": state["durable"],
+            "ackCursor": state["ackCursor"],
+        }
 
     @app.post("/v1/events", dependencies=[Depends(require_ingest)])
     def ingest(body: dict[str, Any]) -> dict[str, Any]:
@@ -76,7 +84,35 @@ def create_app(
             if isinstance(row, dict):
                 host.observe_publish(row, status, sequence)
             results.append({"status": status, "sequence": sequence})
-        return {"results": results}
+        state = queue.status()
+        return {"results": results, "sessionId": state["sessionId"], "resetEpoch": state["resetEpoch"]}
+
+    @app.get("/v1/acks", dependencies=[Depends(require_ingest)])
+    def acks(after: int = 0, limit: int = 200) -> dict[str, Any]:
+        """Producer-side ack tracking: which eventIds Roblox has confirmed.
+
+        The mirror keeps its outbox until its rows appear here, so a restart or a
+        spin-down of this service cannot silently drop unacked events.
+        """
+        if after < 0:
+            raise HTTPException(status_code=400, detail="invalid")
+        limit = max(1, min(500, limit))
+        journal = getattr(queue, "journal", None)
+        if journal is None:
+            state = queue.status()
+            return {
+                "after": after,
+                "next": after,
+                "cursor": 0,
+                "ids": [],
+                "sessionId": state["sessionId"],
+                "resetEpoch": state["resetEpoch"],
+                "depth": state["depth"],
+                "durable": False,
+            }
+        answer = journal.acks_after(after, limit)
+        answer["durable"] = True
+        return answer
 
     @app.get("/v1/events", dependencies=[Depends(require_read)])
     def pull(limit: int = 20) -> dict[str, Any]:
@@ -84,7 +120,8 @@ def create_app(
         if status == "rate_limited":
             raise HTTPException(status_code=429, detail="rate_limited")
         host.note_pull(rows)
-        return {"events": rows, "sessionId": queue.status()["sessionId"]}
+        state = queue.status()
+        return {"events": rows, "sessionId": state["sessionId"], "resetEpoch": state["resetEpoch"]}
 
     @app.post("/v1/events/ack", dependencies=[Depends(require_read)])
     def ack(body: dict[str, Any]) -> dict[str, Any]:
@@ -104,12 +141,13 @@ def create_app(
         return {"acked": removed}
 
     @app.post("/v1/session/reset", dependencies=[Depends(require_ingest)])
-    def reset_session(body: dict[str, Any]) -> dict[str, str]:
+    def reset_session(body: dict[str, Any]) -> dict[str, Any]:
         if body.get("confirm") is not True:
             raise HTTPException(status_code=400, detail="invalid")
         if avatars is not None:
             avatars.clear()
-        return {"sessionId": queue.reset()}
+        session_id = queue.reset()
+        return {"sessionId": session_id, "resetEpoch": queue.status()["resetEpoch"]}
 
     @app.get("/v1/overlay/viewers", dependencies=[Depends(require_read)])
     def overlay() -> dict[str, Any]:

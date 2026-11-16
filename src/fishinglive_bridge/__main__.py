@@ -23,13 +23,25 @@ def main() -> None:
     root = Path(__file__).resolve().parents[2]
     settings = load_settings(root / ".env")
     configure_logging(settings.secret_values())
-    queue = EventQueue()
+    queue = EventQueue(journal_path=settings.journal_path or None)
+    if queue.durable:
+        logger.info("queue journal: %s (%s recovered rows)", queue.status()["journal"], queue.recovered)
     avatars = AvatarCache()
     mirror = None
     if settings.mirror_url:
         # The host page is loopback-only; Roblox polls this public bridge instead.
-        mirror = UpstreamMirror(settings.mirror_url, settings.mirror_key)
-        logger.info("mirror: republishing host-controller events to %s", settings.mirror_url)
+        # The outbox is what makes the copy survive a restart or a Render redeploy.
+        mirror = UpstreamMirror(
+            settings.mirror_url,
+            settings.mirror_key,
+            outbox_path=settings.outbox_path or None,
+            ttl=settings.outbox_ttl,
+        )
+        logger.info(
+            "mirror: republishing host-controller events to %s (outbox %s)",
+            settings.mirror_url,
+            "durable" if mirror.durable else "memory",
+        )
 
     @asynccontextmanager
     async def lifespan(_app):
