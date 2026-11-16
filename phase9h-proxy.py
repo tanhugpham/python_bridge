@@ -88,7 +88,9 @@ def make_handler(origin: str):
             with LOCK:
                 STATE["requests"] += 1
                 STATE["lastPath"] = self.path
-                down = STATE["mode"] == "down"
+                # Only the mirror's own endpoints are cut. My health probe is a separate
+                # client link and must stay usable while the mirror is offline.
+                down = STATE["mode"] == "down" and parsed.path in {"/v1/events", "/v1/acks"}
             if down:
                 with LOCK:
                     STATE["dropped"] += 1
