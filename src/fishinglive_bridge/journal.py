@@ -309,7 +309,7 @@ class OutboxJournal:
         return [max(0.0, now - float(row[0])) for row in rows]
 
 
-    def take(self, session_id: str, limit: int, older_than: float = 10.0) -> list[dict[str, Any]]:
+    def take(self, session_id: str, limit: int, older_than: float = 10.0, max_tries: int = 6) -> list[dict[str, Any]]:
         """Rows that still need a POST: never sent, sent elsewhere, or sent but unacked."""
         now = time.time()
         with self.lock:
@@ -319,12 +319,11 @@ class OutboxJournal:
                 FROM outbox
                 WHERE sent_session IS NULL
                    OR sent_session != ?
-                   OR sent_at IS NULL
-                   OR sent_at <= ?
+                   OR (sent_at IS NULL OR sent_at <= ?) AND tries < ?
                 ORDER BY row_id
                 LIMIT ?
                 """,
-                (session_id, now - max(0.5, float(older_than)), max(1, int(limit))),
+                (session_id, now - max(0.5, float(older_than)), max(0, int(max_tries)), max(1, int(limit))),
             ).fetchall()
         return [
             {
@@ -377,15 +376,15 @@ class OutboxJournal:
         with self.lock:
             return int(self.conn.execute("SELECT COUNT(*) FROM outbox").fetchone()[0])
 
-    def unsent(self, session_id: str, older_than: float = 10.0) -> int:
+    def unsent(self, session_id: str, older_than: float = 10.0, max_tries: int = 6) -> int:
         with self.lock:
             return int(self.conn.execute(
                 """
                 SELECT COUNT(*) FROM outbox
                 WHERE sent_session IS NULL OR sent_session != ?
-                   OR sent_at IS NULL OR sent_at <= ?
+                   OR (sent_at IS NULL OR sent_at <= ?) AND tries < ?
                 """,
-                (session_id, time.time() - max(0.5, float(older_than))),
+                (session_id, time.time() - max(0.5, float(older_than)), max(0, int(max_tries))),
             ).fetchone()[0])
 
     def purge_expired(self, ttl: float) -> int:

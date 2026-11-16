@@ -32,6 +32,8 @@ MIRROR_TIMEOUT = 10.0
 MIRROR_RETRIES = 2
 MIRROR_PACE = 0.35
 MIRROR_RESEND_AFTER = 30.0
+MIRROR_RESEND_TRIES = 6
+MIRROR_ACK_POLL = 1.0
 MIRROR_TTL = 1800.0
 LATENCY_SAMPLES = 200
 MIRRORED_STATUSES = {"created", "coalesced", "duplicate"}
@@ -137,6 +139,7 @@ class UpstreamMirror:
         self.reset_epoch = 0
         self.retry_at = 0.0
         self.consecutive = 0
+        self.last_ack_poll = 0.0
         self.journal: OutboxJournal | None = None
         self.durable = False
         self.outbox_name = ""
@@ -180,7 +183,7 @@ class UpstreamMirror:
     def status(self) -> dict[str, Any]:
         journal = self.journal
         queued = journal.pending() if journal is not None else 0
-        unsent = journal.unsent(self.session_id, self.resend_after) if journal is not None else 0
+        unsent = journal.unsent(self.session_id, self.resend_after, MIRROR_RESEND_TRIES) if journal is not None else 0
         with self.lock:
             latencies = list(self.latencies)
             ack_latencies = list(self.ack_latencies)
@@ -224,7 +227,7 @@ class UpstreamMirror:
         deadline = self.now() + timeout
         while self.now() < deadline:
             if self.journal is not None:
-                if self.journal.unsent(self.session_id, self.resend_after) == 0:
+                if self.journal.unsent(self.session_id, self.resend_after, MIRROR_RESEND_TRIES) == 0:
                     return True
             else:
                 with self.lock:
@@ -265,7 +268,7 @@ class UpstreamMirror:
         if self.journal is not None:
             if self._blocked():
                 return False
-            return self.journal.unsent(self.session_id, self.resend_after) > 0
+            return self.journal.unsent(self.session_id, self.resend_after, MIRROR_RESEND_TRIES) > 0
         with self.lock:
             return bool(self.outbox)
 
@@ -273,7 +276,7 @@ class UpstreamMirror:
         if self.journal is not None:
             if self._blocked():
                 return []
-            return self.journal.take(self.session_id, self.batch, self.resend_after)
+            return self.journal.take(self.session_id, self.batch, self.resend_after, MIRROR_RESEND_TRIES)
         with self.lock:
             rows = []
             while self.outbox and len(rows) < self.batch:
@@ -293,8 +296,9 @@ class UpstreamMirror:
                     # Render accepts 60 ingest rows per second; one 20-row batch per
                     # 0.35 s keeps a burst (500 viewers) under that gate.
                     self.stop.wait(MIRROR_PACE)
-                continue
-            if self.journal is not None:
+            # Ack polling must never starve while the outbox still holds rows: the queue
+            # can be replaced (new session) exactly when there is a backlog.
+            if self.journal is not None and not self._blocked():
                 self._poll_acks()
 
     def _send(self, rows: list[dict[str, Any]]) -> None:
@@ -386,6 +390,9 @@ class UpstreamMirror:
         journal = self.journal
         if journal is None:
             return
+        if time.time() - self.last_ack_poll < MIRROR_ACK_POLL:
+            return
+        self.last_ack_poll = time.time()
         try:
             status, text = self.fetch(self.acks_url, self.key, self.cursor, self.timeout)
         except Exception as error:

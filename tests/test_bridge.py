@@ -776,7 +776,7 @@ class MirrorTests(unittest.TestCase):
             app = create_app(self.mirror_settings(Path(folder)), EventQueue())
             health = TestClient(app).get("/v1/health").json()
         self.assertTrue(health["ok"])
-        self.assertEqual(health["version"], "1.3.0")
+        self.assertEqual(health["version"], "1.3.1")
 
     def test_stress_join_is_mirrored(self) -> None:
         posted: list[dict] = []
