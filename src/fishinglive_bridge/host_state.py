@@ -11,6 +11,7 @@ from typing import Any
 from urllib.parse import urlsplit
 
 from fishinglive_bridge.config import Settings
+from fishinglive_bridge.mirror import MIRRORED_STATUSES
 from fishinglive_bridge.queue_store import EventQueue
 from fishinglive_bridge.schema import parse_event
 
@@ -60,6 +61,16 @@ STRESS_KINDS = {
     "roblox_disconnected",
     "roblox_reconnect",
 }
+AUTO_DEMO_VIEWERS = 10
+AUTO_DEMO_PACE = 0.75
+AUTO_DEMO_REST = 3.0
+AUTO_DEMO_LIKE_BURST = 100
+AUTO_DEMO_CHAT = (
+    "xin chào cả nhà",
+    "cá to quá",
+    "cố lên /giật",
+    "hóng cá hiếm",
+)
 
 
 def _now() -> float:
@@ -201,9 +212,10 @@ def _cpu_seconds() -> float | None:
 
 
 class HostState:
-    def __init__(self, queue: EventQueue, settings: Settings) -> None:
+    def __init__(self, queue: EventQueue, settings: Settings, mirror: Any = None) -> None:
         self.queue = queue
         self.settings = settings
+        self.mirror = mirror
         self.lock = threading.Lock()
         self.viewers: dict[str, dict[str, Any]] = {}
         self.by_name: dict[str, str] = {}
@@ -220,6 +232,15 @@ class HostState:
             "note": "",
         }
         self.commands: deque[dict[str, Any]] = deque(maxlen=40)
+        self.demo_stop = threading.Event()
+        self.demo: dict[str, Any] = {
+            "running": False,
+            "note": "",
+            "step": "",
+            "sent": 0,
+            "wave": 0,
+            "viewers": [],
+        }
         self.session_on = True
 
     def issue_token(self) -> str:
@@ -245,6 +266,27 @@ class HostState:
                 return False
             return True
 
+    def mirror_status(self) -> dict[str, Any]:
+        if self.mirror is None:
+            return {
+                "enabled": False,
+                "url": "",
+                "queued": 0,
+                "sent": 0,
+                "failed": 0,
+                "lastError": "",
+                "note": "Chưa bật BRIDGE_MIRROR_URL. Sự kiện chỉ nằm ở hàng đợi local.",
+            }
+        return self.mirror.status()
+
+    def mirror_external(self, payload: dict[str, Any], status: str) -> None:
+        """Forward events published outside HostState (the legacy /control page)."""
+        if self.mirror is None or status not in MIRRORED_STATUSES:
+            return
+        event, _ = parse_event(payload)
+        if event is not None:
+            self.mirror.submit(event)
+
     def roblox_label(self, state: dict[str, Any] | None = None) -> str:
         state = state if state is not None else self.queue.status()
         last_pull = float(state.get("lastPullAt") or 0)
@@ -259,6 +301,8 @@ class HostState:
         with self.lock:
             viewers = list(self.viewers.values())
             stress = dict(self.stress)
+            demo = dict(self.demo)
+            demo["viewers"] = list(self.demo["viewers"])
             session_on = self.session_on
         likes = sum(int(row["likes"]) for row in viewers)
         gifts = sum(int(row["gifts"]) for row in viewers)
@@ -296,6 +340,8 @@ class HostState:
             "process": sample,
             "batchLatencyMs": state["batchLatencyMs"],
             "stress": stress,
+            "autoDemo": demo,
+            "mirror": self.mirror_status(),
             "sessionOn": session_on,
             "httpsTunnel": {
                 "connected": False,
@@ -409,12 +455,14 @@ class HostState:
                 "cameraQueue": None,
                 "note": "Chưa kết nối telemetry Roblox",
             },
+            "mirror": board["mirror"],
         }
 
     def reset_mock(self) -> dict[str, Any]:
         if self.settings.live:
             return self._blocked()
         self.stop_stress()
+        self.stop_auto_demo()
         session = self.queue.reset()
         with self.lock:
             self.viewers.clear()
@@ -436,6 +484,8 @@ class HostState:
             return self.reset_mock()
         if action == "stress_stop":
             return self.stop_stress()
+        if action == "auto_demo_stop":
+            return self.stop_auto_demo()
         if not self._session_open() and action not in {
             "refresh_leaderboard",
             "reset_leaderboard",
@@ -456,6 +506,8 @@ class HostState:
             return self.start_stress(str(kind), pace if pace is not None else 0.025)
         if self.settings.live and action not in {"refresh"}:
             return self._blocked()
+        if action == "auto_demo_start":
+            return self.start_auto_demo()
         if action == "add_viewer":
             return self.add_viewer(
                 body.get("username"),
@@ -505,6 +557,7 @@ class HostState:
 
     def stop_session(self) -> dict[str, Any]:
         self.stop_stress()
+        self.stop_auto_demo()
         with self.lock:
             self.session_on = False
         return self._result("ACCEPTED_BY_BRIDGE", "NOT_DELIVERED", None, "", "Đã dừng phiên giả lập. Hàng đợi giữ nguyên. Không đổi cấu hình Roblox.")
@@ -911,6 +964,56 @@ class HostState:
             self.stress["note"] = "stopped"
         return self._result("ACCEPTED_BY_BRIDGE", "NOT_DELIVERED", None, "", "Đã dừng bài test.", extra={"sent": sent})
 
+    def start_auto_demo(self) -> dict[str, Any]:
+        if self.settings.live:
+            return self._blocked()
+        with self.lock:
+            if self.demo["running"]:
+                return self._fail("busy", "AUTO DEMO đang chạy. Bấm dừng trước.")
+            if self.stress["running"]:
+                return self._fail("busy", "Đang có bài test tải. Bấm dừng trước.")
+        names: list[str] = []
+        rows: list[tuple[str, dict[str, Any]]] = []
+        for _ in range(AUTO_DEMO_VIEWERS):
+            name = self._alloc_name()
+            user_id = "ma" + secrets.token_hex(5)
+            rows.append((user_id, self._blank(name, user_id)))
+            names.append(name)
+        with self.lock:
+            for user_id, row in rows:
+                self.viewers[user_id] = row
+                self.by_name[row["username"]] = user_id
+            state = {
+                "running": True,
+                "note": "running",
+                "step": "khởi động",
+                "sent": 0,
+                "wave": 0,
+                "viewers": list(names),
+            }
+            run_stop = threading.Event()
+            self.demo = state
+            self.demo_stop = run_stop
+        worker = threading.Thread(target=self._auto_demo_loop, args=(list(names), state, run_stop), daemon=True)
+        worker.start()
+        return self._result(
+            "ACCEPTED_BY_BRIDGE",
+            "NOT_DELIVERED",
+            None,
+            "",
+            f"AUTO DEMO đã bắt đầu với {AUTO_DEMO_VIEWERS} viewer giả lập trên bridge. Chưa phải ACK Roblox.",
+            extra={"viewers": list(names), "appliedOnRoblox": False, "mockOnly": True},
+        )
+
+    def stop_auto_demo(self) -> dict[str, Any]:
+        self.demo_stop.set()
+        with self.lock:
+            sent = self.demo.get("sent", 0)
+            self.demo["running"] = False
+            self.demo["note"] = "stopped"
+            self.demo["step"] = "đã dừng"
+        return self._result("ACCEPTED_BY_BRIDGE", "NOT_DELIVERED", None, "", "Đã dừng AUTO DEMO.", extra={"sent": sent})
+
     def observe_publish(self, payload: dict[str, Any], status: str, sequence: int | None, purpose: str | None = None) -> None:
         event, reason = parse_event(payload)
         if event is None:
@@ -976,6 +1079,101 @@ class HostState:
                     entry["robloxStatus"] = "ACKNOWLEDGED"
                     entry["status"] = "ACKNOWLEDGED"
                     entry["evidence"] = "observed"
+
+    def _auto_demo_plan(self, names: list[str]) -> list[tuple[str, Any]]:
+        lead = names[0]
+        helper = names[1]
+        spotter = names[2]
+        gifter = names[3]
+        baiters = names[4:9]
+        plan: list[tuple[str, Any]] = []
+        for burst in range(5):
+            plan.append((
+                f"tim {AUTO_DEMO_LIKE_BURST} cho {lead} ({burst + 1}/5)",
+                lambda name=lead: self.send_like(name, AUTO_DEMO_LIKE_BURST, None),
+            ))
+        plan.append(("mở khóa câu cho " + lead, lambda: self.send_comment(lead, "/câu", None)))
+        plan.append(("hỗ trợ /giật cho " + lead, lambda: self.send_comment(helper, "/giật", None)))
+        plan.append(("xin /vitri cho " + lead, lambda: self.send_comment(lead, "/vitri", None)))
+        for burst in range(5):
+            plan.append((
+                f"tim {AUTO_DEMO_LIKE_BURST} cho {helper} ({burst + 1}/5)",
+                lambda name=helper: self.send_like(name, AUTO_DEMO_LIKE_BURST, None),
+            ))
+        plan.append(("mở khóa câu cho " + helper, lambda: self.send_comment(helper, "câu", None)))
+        plan.append((f"quà 20 xu từ {gifter}", lambda: self.send_gift({
+            "username": gifter,
+            "purpose": "steal",
+            "giftId": "GIFT_STEAL",
+            "giftName": "Rose",
+            "coinValue": 20,
+            "repeatCount": 1,
+        })))
+        plan.append((f"quà 30 xu từ {gifter}", lambda: self.send_gift({
+            "username": gifter,
+            "purpose": "camera",
+            "giftId": "GIFT_CAMERA",
+            "giftName": "Galaxy",
+            "coinValue": 30,
+            "repeatCount": 1,
+        })))
+        for name, bait in zip(baiters, BAITS):
+            plan.append((
+                f"mồi cấp {bait['tier']} từ {name}",
+                lambda name=name, bait=bait: self.send_gift({
+                    "username": name,
+                    "purpose": "bait",
+                    "giftId": bait["id"],
+                    "giftName": bait["name"],
+                    "coinValue": bait["coins"],
+                    "repeatCount": 1,
+                }),
+            ))
+        plan.append(("bình luận từ " + spotter, lambda: self.send_comment(spotter, AUTO_DEMO_CHAT[0], None)))
+        return plan
+
+    def _auto_demo_loop(self, names: list[str], state: dict[str, Any], stop: threading.Event) -> None:
+        sent = 0
+        wave = 0
+        note = "done"
+        try:
+            while not stop.is_set():
+                wave += 1
+                with self.lock:
+                    state["wave"] = wave
+                halted = False
+                for label, runner in self._auto_demo_plan(names):
+                    if stop.is_set():
+                        note = "stopped"
+                        halted = True
+                        break
+                    if self.queue.status()["depth"] >= self.queue.capacity:
+                        note = "queue_cap"
+                        halted = True
+                        break
+                    with self.lock:
+                        state["step"] = label
+                    outcome = runner()
+                    if isinstance(outcome, dict) and outcome.get("bridgeStatus") == "FAILED":
+                        note = "step_failed"
+                    sent += 1
+                    with self.lock:
+                        state["sent"] = sent
+                    if stop.wait(AUTO_DEMO_PACE):
+                        note = "stopped"
+                        halted = True
+                        break
+                if halted:
+                    break
+                if stop.wait(AUTO_DEMO_REST):
+                    note = "stopped"
+                    break
+        finally:
+            with self.lock:
+                state["running"] = False
+                state["sent"] = sent
+                state["step"] = "đã dừng"
+                state["note"] = "stopped" if stop.is_set() else note
 
     def _stress_loop(self, kind: str, pace: float) -> None:
         targets = {
@@ -1087,6 +1285,9 @@ class HostState:
             return self._result("FAILED", "NOT_DELIVERED", None, event["eventId"], "Hàng đợi đã đầy. Không xếp thêm sự kiện được bảo vệ.")
         status, sequence = self.queue.publish(event, rate_limit=False)
         self.observe_publish(event, status, sequence, purpose)
+        if self.mirror is not None and status in MIRRORED_STATUSES:
+            # Roblox polls the public bridge, not this loopback process.
+            self.mirror.submit(event)
         if status == "created":
             return self._result("QUEUED", "CHƯA KÉO", sequence, event["eventId"], "Bridge đã xếp sự kiện. Roblox chưa ACK.")
         if status == "coalesced":

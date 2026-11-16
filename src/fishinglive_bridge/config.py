@@ -43,6 +43,9 @@ class Settings:
     target_idc: str
     max_backoff: float = 60.0
     batch_limit: int = 20
+    # Mock-only: republish local host-controller events to the bridge Roblox polls.
+    mirror_url: str = ""
+    mirror_key: str = ""
 
     @property
     def live(self) -> bool:
@@ -70,18 +73,35 @@ def load_settings(env_file: Path | None = None) -> Settings:
     port = int(os.environ.get("BRIDGE_PORT") or (os.environ.get("PORT", "10000") if on_render else "8787"))
     ssl_cert = os.environ.get("BRIDGE_SSL_CERT", "").strip()
     ssl_key = os.environ.get("BRIDGE_SSL_KEY", "").strip()
+    ingest_key = _required("BRIDGE_INGEST_KEY", 16)
+    read_key = _required("BRIDGE_READ_KEY", 16)
+    # The mirror exists because the local host page binds 127.0.0.1 while Roblox can only
+    # reach the public bridge. Live mode already ingests into this same queue, so it is off.
+    mirror_url = os.environ.get("BRIDGE_MIRROR_URL", "").strip().rstrip("/")
+    mirror_key = os.environ.get("BRIDGE_MIRROR_INGEST_KEY", "").strip()
+    if mode == "live":
+        mirror_url = ""
+        mirror_key = ""
+    if mirror_url:
+        if not (mirror_url.startswith("https://") or mirror_url.startswith("http://")):
+            raise RuntimeError("BRIDGE_MIRROR_URL must be an http(s) URL")
+        mirror_key = mirror_key or ingest_key
+        if len(mirror_key) < 16:
+            raise RuntimeError("BRIDGE_MIRROR_INGEST_KEY is missing")
     settings = Settings(
         mode=mode,
         host=host,
         port=port,
-        ingest_key=_required("BRIDGE_INGEST_KEY", 16),
-        read_key=_required("BRIDGE_READ_KEY", 16),
+        ingest_key=ingest_key,
+        read_key=read_key,
         queue_path=Path(os.environ.get("BRIDGE_QUEUE_PATH", "data/queue.json")),
         ssl_cert=ssl_cert,
         ssl_key=ssl_key,
         tiktok_username=os.environ.get("TIKTOK_USERNAME", "").strip().lstrip("@"),
         session_id=os.environ.get("TIKTOK_SESSION_ID", "").strip(),
         target_idc=os.environ.get("TIKTOK_TARGET_IDC", "").strip(),
+        mirror_url=mirror_url,
+        mirror_key=mirror_key,
     )
     if settings.live and not settings.tiktok_username:
         raise RuntimeError("TIKTOK_USERNAME is required in live mode")

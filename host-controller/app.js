@@ -95,10 +95,14 @@
     var mode = board && board.mockMode ? "warn" : "bad";
     var label = board && board.roblox ? board.roblox.label : "ROBLOX DISCONNECTED";
     var session = board && board.sessionOn ? "ok" : "warn";
+    var mirror = board && board.mirror ? board.mirror : null;
+    var mirrorTone = mirror && mirror.enabled ? (mirror.lastError ? "bad" : "ok") : "warn";
+    var mirrorText = mirror && mirror.enabled ? "MIRROR " + (mirror.queued || 0) + " CHỜ" : "MIRROR TẮT";
     $("pills").innerHTML =
       '<span class="pill ' + bridge + '">PYTHON BRIDGE</span>' +
       '<span class="pill ' + roblox + '">' + label + '</span>' +
       '<span class="pill ' + mode + '">' + (board && board.mockMode ? "MOCK MODE" : "LIVE") + '</span>' +
+      '<span class="pill ' + mirrorTone + '">' + mirrorText + '</span>' +
       '<span class="pill ' + session + '">' + (board && board.sessionOn ? "PHIÊN TEST" : "PHIÊN DỪNG") + '</span>';
   }
 
@@ -113,6 +117,11 @@
     var cpu = board.process && board.process.cpuPercent;
     var ack = board.roblox.lastAckAt ? "CÓ ACK" : "CHƯA CÓ ACK";
     var tunnel = board.httpsTunnel && board.httpsTunnel.label ? board.httpsTunnel.label : "KHÔNG CHẠY";
+    var mirror = board.mirror || {};
+    var mirrorValue = mirror.enabled
+      ? (mirror.sent || 0) + " gửi · " + (mirror.failed || 0) + " lỗi"
+      : "TẮT";
+    var mirrorTone = mirror.enabled ? (mirror.lastError ? "bad" : "ok") : "warn";
     $("cards").innerHTML =
       card("PYTHON BRIDGE", "ĐANG CHẠY", "ok") +
       card("HTTPS TUNNEL", tunnel, "bad") +
@@ -128,7 +137,9 @@
       card("TOTAL FISH", missing(board.totalFish)) +
       card("TOTAL MISSES", missing(board.totalMisses)) +
       card("PYTHON RSS", rss ? Math.round(rss / 1048576) + " MB" : "Chưa có dữ liệu") +
-      card("PYTHON CPU", cpu === null || cpu === undefined ? "Đang lấy mẫu" : cpu + " %");
+      card("PYTHON CPU", cpu === null || cpu === undefined ? "Đang lấy mẫu" : cpu + " %") +
+      card("AUTO DEMO", board.autoDemo && board.autoDemo.running ? "ĐANG CHẠY" : "DỪNG", board.autoDemo && board.autoDemo.running ? "gold" : "") +
+      card("RENDER MIRROR", mirrorValue, mirrorTone);
     $("projection").textContent = board.projectionNote || "";
     var warn = $("roblox-warn");
     if (board.roblox.connected) {
@@ -139,6 +150,17 @@
     }
     if (board.stress && board.stress.running) {
       $("stress-feedback").textContent = "Đang chạy " + board.stress.kind + " · đã gửi " + board.stress.sent;
+    }
+    var demo = board.autoDemo || {};
+    var demoNode = $("auto-demo-feedback");
+    if (demoNode) {
+      if (demo.running) {
+        demoNode.textContent = "AUTO DEMO đang chạy · vòng " + (demo.wave || 0) + " · " + (demo.sent || 0) + " sự kiện · " + (demo.step || "");
+        demoNode.className = "feedback ok-text";
+      } else if (demo.note) {
+        demoNode.textContent = "AUTO DEMO dừng · " + (demo.sent || 0) + " sự kiện · " + ((demo.viewers || []).length) + " viewer";
+        demoNode.className = "feedback";
+      }
     }
   }
 
@@ -544,6 +566,12 @@
     });
     $("stress-stop").addEventListener("click", function () {
       post("stress_stop").then(function (data) { showResult($("stress-feedback"), data); });
+    });
+    $("auto-demo-start").addEventListener("click", function () {
+      post("auto_demo_start").then(function (data) { showResult($("auto-demo-feedback"), data); refresh(); });
+    });
+    $("auto-demo-stop").addEventListener("click", function () {
+      post("auto_demo_stop").then(function (data) { showResult($("auto-demo-feedback"), data); refresh(); });
     });
     $("reset-session").addEventListener("click", function () {
       post("reset_session").then(function (data) {

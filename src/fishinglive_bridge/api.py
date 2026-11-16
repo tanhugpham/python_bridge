@@ -9,6 +9,7 @@ from typing import Any
 from fastapi import Depends, FastAPI, Header, HTTPException, Request
 from fastapi.responses import FileResponse, JSONResponse
 
+from fishinglive_bridge import __version__
 from fishinglive_bridge.avatar_cache import AvatarCache
 from fishinglive_bridge.config import Settings
 from fishinglive_bridge.host_state import HostState, host_allowed, origin_allowed
@@ -37,9 +38,10 @@ def create_app(
     avatars: AvatarCache | None = None,
     control_dir: Path | None = None,
     host_dir: Path | None = None,
+    mirror=None,
 ) -> FastAPI:
     app = FastAPI(title="FishingLive Bridge", docs_url=None, redoc_url=None, openapi_url=None, lifespan=lifespan)
-    host = HostState(queue, settings)
+    host = HostState(queue, settings, mirror)
     app.state.host = host
 
     def require_ingest(x_bridge_key: str = Header(default="")) -> None:
@@ -61,7 +63,7 @@ def create_app(
     @app.get("/v1/health")
     def health() -> dict[str, Any]:
         state = queue.status()
-        return {"ok": True, "sessionId": state["sessionId"], "depth": state["depth"]}
+        return {"ok": True, "version": __version__, "sessionId": state["sessionId"], "depth": state["depth"]}
 
     @app.post("/v1/events", dependencies=[Depends(require_ingest)])
     def ingest(body: dict[str, Any]) -> dict[str, Any]:
@@ -168,6 +170,7 @@ def create_app(
         status, sequence = queue.publish(body)
         if isinstance(body, dict):
             host.observe_publish(body, status, sequence)
+            host.mirror_external(body, status)
         return {"status": status, "sequence": sequence, "depth": queue.status()["depth"]}
 
     def _host_file(name: str, media: str) -> FileResponse:
@@ -260,6 +263,11 @@ def create_app(
     def host_stress(request: Request) -> dict[str, Any]:
         require_host_page(request)
         return host.dashboard()["stress"]
+
+    @app.get("/host/auto-demo")
+    def host_auto_demo(request: Request) -> dict[str, Any]:
+        require_host_page(request)
+        return host.dashboard()["autoDemo"]
 
     @app.post("/host/action")
     def host_action(body: dict[str, Any], request: Request) -> dict[str, Any]:

@@ -12,6 +12,7 @@ import uvicorn
 from fishinglive_bridge.api import create_app
 from fishinglive_bridge.avatar_cache import AvatarCache
 from fishinglive_bridge.config import load_settings
+from fishinglive_bridge.mirror import UpstreamMirror
 from fishinglive_bridge.queue_store import EventQueue
 from fishinglive_bridge.redact import configure_logging
 
@@ -24,6 +25,11 @@ def main() -> None:
     configure_logging(settings.secret_values())
     queue = EventQueue()
     avatars = AvatarCache()
+    mirror = None
+    if settings.mirror_url:
+        # The host page is loopback-only; Roblox polls this public bridge instead.
+        mirror = UpstreamMirror(settings.mirror_url, settings.mirror_key)
+        logger.info("mirror: republishing host-controller events to %s", settings.mirror_url)
 
     @asynccontextmanager
     async def lifespan(_app):
@@ -46,6 +52,8 @@ def main() -> None:
             yield
         finally:
             stop.set()
+            if mirror is not None:
+                mirror.close()
             if task is not None:
                 task.cancel()
                 try:
@@ -59,7 +67,15 @@ def main() -> None:
         logger.info("control center on http://%s:%s/control", settings.host, settings.port)
     if settings.loopback and (host_dir / "index.html").is_file():
         logger.info("host controller on http://%s:%s/host", settings.host, settings.port)
-    app = create_app(settings, queue, lifespan, avatars, control_dir=control_dir, host_dir=host_dir)
+    app = create_app(
+        settings,
+        queue,
+        lifespan,
+        avatars,
+        control_dir=control_dir,
+        host_dir=host_dir,
+        mirror=mirror,
+    )
     uvicorn.run(
         app,
         host=settings.host,

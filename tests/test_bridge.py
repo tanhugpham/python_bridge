@@ -3,18 +3,22 @@
 from __future__ import annotations
 
 import importlib.metadata as metadata
+import json
 import os
 import struct
 import tempfile
 import time
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from fastapi.testclient import TestClient
 
 from fishinglive_bridge.api import create_app
 from fishinglive_bridge.avatar_cache import AvatarCache
 from fishinglive_bridge.config import Settings, load_settings
+from fishinglive_bridge.host_state import HostState
+from fishinglive_bridge.mirror import UpstreamMirror
 from fishinglive_bridge.normalize import EventIdFactory, normalize_comment, normalize_gift
 from fishinglive_bridge.queue_store import EventQueue
 from fishinglive_bridge.redact import RedactingFormatter
@@ -63,6 +67,42 @@ def settings(path: Path) -> Settings:
 
 
 class BridgeTests(unittest.TestCase):
+    def test_render_proxy_configuration(self) -> None:
+        env = {
+            "RENDER": "true",
+            "PORT": "10000",
+            "BRIDGE_MODE": "mock",
+            "BRIDGE_INGEST_KEY": INGEST,
+            "BRIDGE_READ_KEY": READ,
+        }
+        with patch.dict(os.environ, env, clear=True):
+            cfg = load_settings()
+        self.assertEqual(cfg.host, "0.0.0.0")
+        self.assertEqual(cfg.port, 10000)
+        self.assertFalse(cfg.live)
+        self.assertEqual(cfg.ssl_cert, "")
+
+    def test_non_render_public_bind_still_needs_tls(self) -> None:
+        env = {
+            "BRIDGE_HOST": "0.0.0.0",
+            "BRIDGE_MODE": "mock",
+            "BRIDGE_INGEST_KEY": INGEST,
+            "BRIDGE_READ_KEY": READ,
+        }
+        with patch.dict(os.environ, env, clear=True):
+            with self.assertRaisesRegex(RuntimeError, "public bind requires TLS"):
+                load_settings()
+
+    def test_local_defaults_unchanged(self) -> None:
+        env = {
+            "BRIDGE_MODE": "mock",
+            "BRIDGE_INGEST_KEY": INGEST,
+            "BRIDGE_READ_KEY": READ,
+        }
+        with patch.dict(os.environ, env, clear=True):
+            cfg = load_settings()
+        self.assertEqual((cfg.host, cfg.port), ("127.0.0.1", 8787))
+
     def test_installed_tiktoklive_api(self) -> None:
         from TikTokLive.events import CommentEvent, FollowEvent, GiftEvent, LikeEvent
 
@@ -522,6 +562,38 @@ class BridgeTests(unittest.TestCase):
             time.sleep(0.2)
             self.assertFalse(app.state.host.stress["running"])
 
+    def test_host_auto_demo_ten_viewers_and_stop(self) -> None:
+        page = Path(__file__).resolve().parents[1] / "host-controller"
+        with tempfile.TemporaryDirectory() as folder:
+            app = create_app(settings(Path(folder) / "queue.json"), EventQueue(), host_dir=page)
+            local = TestClient(app, client=("127.0.0.1", 50000))
+            headers = {"Host": "127.0.0.1:8787", "Origin": "http://127.0.0.1:8787"}
+            token = local.get("/host/session", headers=headers).json()["csrf"]
+            headers["X-CSRF-Token"] = token
+            self.assertIn("auto-demo-start", local.get("/host", headers=headers).text)
+            started = local.post("/host/action", headers=headers, json={"action": "auto_demo_start"})
+            self.assertEqual(started.status_code, 200)
+            self.assertEqual(len(started.json()["viewers"]), 10)
+            self.assertFalse(started.json()["appliedOnRoblox"])
+            state = local.get("/host/auto-demo", headers=headers).json()
+            self.assertTrue(state["running"])
+            self.assertEqual(len(state["viewers"]), 10)
+            deadline = time.time() + 6
+            while time.time() < deadline and app.state.host.demo["sent"] < 3:
+                time.sleep(0.1)
+            self.assertGreaterEqual(app.state.host.demo["sent"], 3)
+            board = local.get("/host/dashboard", headers=headers).json()
+            self.assertGreaterEqual(board["viewers"], 10)
+            self.assertGreater(board["totalLikes"], 0)
+            self.assertTrue(board["autoDemo"]["running"])
+            busy = local.post("/host/action", headers=headers, json={"action": "auto_demo_start"})
+            self.assertFalse(busy.json()["ok"])
+            stopped = local.post("/host/action", headers=headers, json={"action": "auto_demo_stop"})
+            self.assertEqual(stopped.status_code, 200)
+            time.sleep(0.3)
+            self.assertFalse(app.state.host.demo["running"])
+            self.assertLessEqual(app.state.host.queue.status()["depth"], 2000)
+
     def test_source_cannot_send_chat(self) -> None:
         source = Path(__file__).parents[1] / "src" / "fishinglive_bridge" / "tiktok_source.py"
         text = source.read_text(encoding="utf-8")
@@ -554,6 +626,162 @@ class BridgeTests(unittest.TestCase):
                     os.environ.pop(key, None)
                 else:
                     os.environ[key] = value
+
+class MirrorTests(unittest.TestCase):
+    """The mock host page is loopback-only; the mirror is what Roblox can actually poll."""
+
+    def mirror_settings(self, folder: Path, url: str = "", key: str = "") -> Settings:
+        return Settings(
+            mode="mock",
+            host="127.0.0.1",
+            port=8787,
+            ingest_key=INGEST,
+            read_key=READ,
+            queue_path=folder / "queue.json",
+            ssl_cert="",
+            ssl_key="",
+            tiktok_username="",
+            session_id="",
+            target_idc="",
+            mirror_url=url,
+            mirror_key=key,
+        )
+
+    def event(self, index: int) -> dict:
+        return {
+            "eventId": "mirror-%03d" % index,
+            "type": "like",
+            "viewerId": "mv%03d" % index,
+            "nickname": "mv%03d" % index,
+            "timestamp": 1000 + index,
+            "payload": {"count": 1},
+        }
+
+    def test_mirror_off_by_default(self) -> None:
+        env = {
+            "BRIDGE_MODE": "mock",
+            "BRIDGE_INGEST_KEY": INGEST,
+            "BRIDGE_READ_KEY": READ,
+        }
+        with patch.dict(os.environ, env, clear=True):
+            cfg = load_settings(Path("does-not-exist.env"))
+        self.assertEqual((cfg.mirror_url, cfg.mirror_key), ("", ""))
+
+    def test_mirror_url_from_env_defaults_key_to_ingest(self) -> None:
+        env = {
+            "BRIDGE_MODE": "mock",
+            "BRIDGE_INGEST_KEY": INGEST,
+            "BRIDGE_READ_KEY": READ,
+            "BRIDGE_MIRROR_URL": "https://python-bridge.invalid/",
+        }
+        with patch.dict(os.environ, env, clear=True):
+            cfg = load_settings(Path("does-not-exist.env"))
+        self.assertEqual(cfg.mirror_url, "https://python-bridge.invalid")
+        self.assertEqual(cfg.mirror_key, INGEST)
+
+    def test_mirror_url_must_be_http(self) -> None:
+        env = {
+            "BRIDGE_MODE": "mock",
+            "BRIDGE_INGEST_KEY": INGEST,
+            "BRIDGE_READ_KEY": READ,
+            "BRIDGE_MIRROR_URL": "python-bridge.invalid",
+        }
+        with patch.dict(os.environ, env, clear=True):
+            with self.assertRaisesRegex(RuntimeError, "http"):
+                load_settings(Path("does-not-exist.env"))
+
+    def test_mirror_ignored_in_live_mode(self) -> None:
+        env = {
+            "BRIDGE_MODE": "live",
+            "BRIDGE_INGEST_KEY": INGEST,
+            "BRIDGE_READ_KEY": READ,
+            "BRIDGE_MIRROR_URL": "https://python-bridge.invalid",
+            "TIKTOK_USERNAME": "someone",
+        }
+        with patch.dict(os.environ, env, clear=True):
+            cfg = load_settings(Path("does-not-exist.env"))
+        self.assertTrue(cfg.live)
+        self.assertEqual(cfg.mirror_url, "")
+    def test_mirror_batches_twenty_and_counts(self) -> None:
+        posted: list[int] = []
+
+        def post(url, key, payload, timeout):
+            posted.append(len(payload["events"]))
+            return 200, json.dumps({"results": [{"status": "created"} for _ in payload["events"]]})
+
+        mirror = UpstreamMirror("https://python-bridge.invalid", INGEST, post=post)
+        try:
+            for index in range(25):
+                mirror.submit(self.event(index))
+            self.assertTrue(mirror.wait_idle(5.0))
+            status = mirror.status()
+        finally:
+            mirror.close()
+        self.assertEqual(sum(posted), 25)
+        self.assertLessEqual(max(posted), 20)
+        self.assertEqual(status["sent"], 25)
+        self.assertEqual(status["created"], 25)
+        self.assertEqual(status["failed"], 0)
+        self.assertEqual(status["queued"], 0)
+        self.assertIsNotNone(status["latencyMs"])
+        self.assertEqual(status["url"], "https://python-bridge.invalid/v1/events")
+
+    def test_mirror_records_transport_failure(self) -> None:
+        def post(url, key, payload, timeout):
+            raise OSError("render unreachable")
+
+        mirror = UpstreamMirror("https://python-bridge.invalid", INGEST, post=post)
+        try:
+            mirror.submit(self.event(1))
+            deadline = time.time() + 8
+            while time.time() < deadline and mirror.status()["failed"] == 0:
+                time.sleep(0.05)
+            status = mirror.status()
+        finally:
+            mirror.close()
+        self.assertEqual(status["sent"], 0)
+        self.assertEqual(status["failed"], 1)
+        self.assertIn("render unreachable", status["lastError"])
+    def test_host_publish_is_mirrored(self) -> None:
+        posted: list[dict] = []
+
+        def post(url, key, payload, timeout):
+            posted.extend(payload["events"])
+            return 200, json.dumps({"results": [{"status": "created"} for _ in payload["events"]]})
+
+        mirror = UpstreamMirror("https://python-bridge.invalid", INGEST, post=post)
+        try:
+            with tempfile.TemporaryDirectory() as folder:
+                host = HostState(EventQueue(), self.mirror_settings(Path(folder)), mirror)
+                host.add_viewer("mirror_lead")
+                liked = host.send_like("mirror_lead", 5, "mirror-like-1")
+                self.assertEqual(liked["bridgeStatus"], "QUEUED")
+                self.assertTrue(mirror.wait_idle(5.0))
+                board = host.dashboard()
+        finally:
+            mirror.close()
+        self.assertIn("mirror-like-1", [row["eventId"] for row in posted])
+        self.assertTrue(board["mirror"]["enabled"])
+        self.assertGreaterEqual(board["mirror"]["sent"], 1)
+
+    def test_dashboard_reports_mirror_disabled(self) -> None:
+        with tempfile.TemporaryDirectory() as folder:
+            host = HostState(EventQueue(), self.mirror_settings(Path(folder)))
+            board = host.dashboard()
+        self.assertFalse(board["mirror"]["enabled"])
+        self.assertEqual(board["mirror"]["sent"], 0)
+
+    def test_health_reports_version(self) -> None:
+        with tempfile.TemporaryDirectory() as folder:
+            app = create_app(self.mirror_settings(Path(folder)), EventQueue())
+            health = TestClient(app).get("/v1/health").json()
+        self.assertTrue(health["ok"])
+        self.assertEqual(health["version"], "1.1.0")
+
+
+
+
+
 
 
 def logging_record(message: str):
