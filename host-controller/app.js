@@ -98,9 +98,12 @@
     var mirror = board && board.mirror ? board.mirror : null;
     var mirrorTone = mirror && mirror.enabled ? (mirror.lastError ? "bad" : "ok") : "warn";
     var mirrorText = mirror && mirror.enabled ? "MIRROR " + (mirror.queued || 0) + " CHỜ" : "MIRROR TẮT";
+    // In mirror mode Roblox polls Render, so this process cannot see its pulls.
+    var robloxText = mirror && mirror.enabled ? "ROBLOX QUA RENDER" : label;
+    var robloxTone = mirror && mirror.enabled ? "warn" : roblox;
     $("pills").innerHTML =
       '<span class="pill ' + bridge + '">PYTHON BRIDGE</span>' +
-      '<span class="pill ' + roblox + '">' + label + '</span>' +
+      '<span class="pill ' + robloxTone + '">' + robloxText + '</span>' +
       '<span class="pill ' + mode + '">' + (board && board.mockMode ? "MOCK MODE" : "LIVE") + '</span>' +
       '<span class="pill ' + mirrorTone + '">' + mirrorText + '</span>' +
       '<span class="pill ' + session + '">' + (board && board.sessionOn ? "PHIÊN TEST" : "PHIÊN DỪNG") + '</span>';
@@ -144,6 +147,9 @@
     var warn = $("roblox-warn");
     if (board.roblox.connected) {
       warn.hidden = true;
+    } else if (mirror && mirror.enabled) {
+      warn.hidden = false;
+      warn.textContent = "Roblox kéo sự kiện từ Render qua mirror. Process local này không thấy lượt kéo đó, nên trạng thái kết nối không đo được ở đây.";
     } else {
       warn.hidden = false;
       warn.textContent = "Roblox bridge đang tắt. Sự kiện dừng ở Python. Trang này không bật HTTP.";
