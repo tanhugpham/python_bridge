@@ -31,6 +31,25 @@ def _keys_match(given: str, expected: str) -> bool:
         return False
 
 
+def _optional_text(body: dict[str, Any], *names: str) -> str | None:
+    """Read an optional string field, telling "absent" apart from "explicitly cleared".
+
+    None means the key was not sent, so the running connector keeps what it has.
+    An explicit null or empty string returns "", which clears that credential for
+    this process only: the value stored in the environment stays untouched and a
+    restart restores it, so a parked session is never destroyed by a switch.
+    """
+    for name in names:
+        if name in body:
+            value = body[name]
+            if value is None:
+                return ""
+            if not isinstance(value, str):
+                raise HTTPException(status_code=422, detail="invalid_session")
+            return value.strip()
+    return None
+
+
 def create_app(
     settings: Settings,
     queue: EventQueue,
@@ -100,7 +119,12 @@ def create_app(
 
     @app.post("/v1/tiktok/switch", dependencies=[Depends(require_ingest)])
     def tiktok_switch(body: dict[str, Any]) -> dict[str, Any]:
-        """Switch the live room at runtime (no redeploy). Session stays in memory only."""
+        """Switch the live room at runtime (no redeploy). Session stays in memory only.
+
+        ``{"username": "name"}`` keeps the current session mode. Adding
+        ``"sessionId": null`` (or "") drops the session for this process, which is how
+        the bridge goes username-only while the stored credential stays parked.
+        """
         if not settings.live:
             raise HTTPException(status_code=409, detail="live_mode_required")
         if live is None:
@@ -108,15 +132,11 @@ def create_app(
         username = normalize_username(body.get("username", body.get("tiktokUsername")))
         if not username:
             raise HTTPException(status_code=422, detail="invalid_username")
-        session_id = body.get("sessionId", body.get("session_id", ""))
-        target_idc = body.get("targetIdc", body.get("target_idc", ""))
-        if not isinstance(session_id, str) or not isinstance(target_idc, str):
-            raise HTTPException(status_code=422, detail="invalid_session")
-        session_id = session_id.strip()
-        target_idc = target_idc.strip()
+        session_id = _optional_text(body, "sessionId", "session_id")
+        target_idc = _optional_text(body, "targetIdc", "target_idc")
         if session_id and not target_idc:
             raise HTTPException(status_code=422, detail="target_idc_required")
-        if len(session_id) > 4096 or len(target_idc) > 32:
+        if len(session_id or "") > 4096 or len(target_idc or "") > 32:
             raise HTTPException(status_code=422, detail="invalid_session")
         try:
             state = live.apply(username, session_id, target_idc)

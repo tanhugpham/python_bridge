@@ -2,19 +2,27 @@
 
 Python 3.10+ nhận sự kiện TikTok LIVE và xếp vào hàng đợi HTTPS. Roblox server chỉ kéo từng batch rồi xác nhận. Client Roblox không gửi sự kiện TikTok.
 
-Chưa triển khai hosting. Chưa kết nối tài khoản TikTok thật.
+Chưa có phòng LIVE thật để nhận sự kiện. Bridge đã triển khai trên Render Free
+(`https://python-bridge-6v9w.onrender.com`, `1.4.0`), deployment đã trỏ tới handle thật
+`surakun0zh` với `hasSession=false` (nghe không cần session), nhưng lúc kiểm tra 2026-11-17
+phòng chưa phát sóng nên `/v1/tiktok` báo `connected=false`, `lastError=UserOfflineError`.
+Quy trình bật LIVE thật: `../FISHINGLIVE_PHASE12_TIKTOK_LIVE.md` (§10 là log lần kiểm tra).
 
 ## Cài trên Windows PowerShell
 
 ```powershell
-cd C:\Users\Tan Hung\Desktop\FishingLive\mapRoblox\tiktok-bridge
+cd C:\Users\ctytp\Desktop\mapRoblox\tiktok-bridge
 py -3 -m venv .venv
 .\.venv\Scripts\Activate.ps1
 python -m pip install -r requirements.txt
 Copy-Item .env.example .env
 ```
 
-Chạy nhanh trên máy này: bấm đúp `Run.bat`. File đó tự dò Python còn chạy được (`.venv313` → `.venv` → `py -3` → `python.exe`) và chỉ nhận interpreter import được `fastapi` + `uvicorn`. Thư mục `.venv313` hiện là bản copy từ máy khác (`C:\Users\ctytp\...\Python313` không còn), nên `python.exe` trong đó báo `did not find executable`; `Run.bat` bỏ qua nó và dùng `.venv`. Có thể xóa `.venv313` nếu không cần.
+Chạy nhanh trên máy này: bấm đúp `Run.bat`. File đó tự dò Python còn chạy được (`.venv313` nếu
+có → `.venv` → `py -3` → `python.exe`) và chỉ nhận interpreter import được `fastapi` + `uvicorn`. Từ
+2026-11-17 chỉ còn một venv chuẩn là `.venv` (CPython 3.13.15, đã cài `requirements.txt` +
+`TikTokLive 7.0.1`); `.venv313` đã xóa. Kiểm tra nhanh:
+`$env:PYTHONPATH='src'; .\.venv\Scripts\python.exe -m unittest discover -s tests` → 42 test qua.
 
 Mở `.env` và đặt hai khóa riêng, mỗi khóa ít nhất 16 ký tự:
 
@@ -81,7 +89,7 @@ Trong Studio, trên `ServerScriptService.FishingLive`, đặt attribute khi bạ
 
 Không đặt `BridgeKey` vào Attribute. Khóa read được chuẩn bị qua Roblox Secrets Store, tên `FISHINGLIVE_BRIDGE_READ_KEY`. `HttpService:GetSecret` trả về kiểu Secret. `BridgePoller` gửi secret đó trong header `x-api-key` cho cả GET batch và POST ack. Không gửi `X-Bridge-Key` từ Roblox. Bản này không tự tạo secret và không bật Allow HTTP Requests.
 
-Polling mặc định 2 giây và chỉ chạy khi `BridgeEnabled` đúng là true. Mỗi batch tối đa 20 sự kiện. Script server bỏ qua localhost, URL `http://`, và không tạo RemoteEvent. `sessionId` đổi khi process Python hoặc lệnh reset đổi phiên. Lỗi mạng không xóa viewer.
+Polling mặc định 2 giây (`BridgeConfig.PollInterval` trong place Hung1 hiện đặt 1 giây) và chỉ chạy khi `BridgeEnabled` đúng là true. Mỗi batch tối đa 20 sự kiện. Script server bỏ qua localhost, URL `http://`, và không tạo RemoteEvent. `sessionId` đổi khi process Python hoặc lệnh reset đổi phiên. Lỗi mạng không xóa viewer.
 
 Thumbnail TikTok, khi được bật sau này, chỉ lấy lúc viewer tham gia, resize 64×64, giữ tối đa 100 ảnh trong RAM. `GET /v1/overlay/viewers` trả ảnh đó cho OBS. Endpoint này chưa được public và không ghi file ảnh.
 
@@ -101,23 +109,39 @@ Bật Game Settings → Security → Allow HTTP Requests chỉ sau khi bạn ph�
 
 `TIKTOK_SESSION_ID` và `TIKTOK_TARGET_IDC` chỉ dùng khi `BRIDGE_MODE=live`. Project không đặt biến `WHITELIST_AUTHENTICATED_SESSION_ID_HOST`. Log của bridge thay khóa và session bằng `***`.
 
+### Chế độ username-only (mặc định)
+
+Để trống cả `TIKTOK_SESSION_ID` và `TIKTOK_TARGET_IDC`: listener vào phòng như người xem ẩn danh, không gửi session của chủ phòng cho sign server. Đây là đường an toàn; đặt session chỉ dùng khi tự dựng sign server đã whitelist.
+
+- Trước khi mở websocket, bridge gọi `is_live()` (một request HTTP). Phòng chưa phát → `lastError=UserOfflineError`, `offline=true`, không mở socket. Sau 5 lần "chưa live" liên tiếp vẫn thử một lần thật để một câu trả lời sai không khóa bridge.
+- `TIKTOK_ROOM_ID` (tùy chọn, chỉ chữ số): bỏ qua bước scrape HTML `@user/live` khi mở kết nối đầu tiên. Room id học được từ lần kết nối thành công được dùng lại cho các lần sau. Cần thiết vì TikTok trả trang WAF (HTML) cho bước scrape, và đó chính là nguồn gốc lỗi `JSONDecodeError` cũ.
+- `ConnectEvent`/`DisconnectEvent` chỉ cập nhật trạng thái, không xếp hàng: schema Roblox vẫn chỉ có `comment`, `like`, `gift`, `follow`.
+
 ## Đổi kênh LIVE khi bridge đang chạy (1.4.0)
 
 Bridge `BRIDGE_MODE=live` đổi được tài khoản mà không cần redeploy:
 
-- `GET /v1/tiktok` (header `X-Bridge-Key` = ingest key) trả `username`, `connected`, `lastError`, `hasSession`, `switches`. Không trả session.
+- `GET /v1/tiktok` (header `X-Bridge-Key` = ingest key) trả `username`, `connected`, `lastError`, `offline`, `sessionMode` (`username-only`/`authenticated`), `hasSession`, `envHasSession`, `roomId`, `attempts`, `connects`, `switches`, `tiktokLive`. Không trả session.
 - `POST /v1/tiktok/switch` body `{ "username": "...", "sessionId": "...", "targetIdc": "..." }` (cùng header).
   - `sessionId` + `targetIdc` chỉ giữ trong RAM, không ghi log, không trả lại.
-  - Để trống `sessionId` = giữ session hiện tại (đổi username cùng tài khoản). Muốn bỏ session thì sửa `.env`/Render rồi restart.
+  - Không gửi `sessionId` = giữ session đang dùng. Gửi `"sessionId": null` (hoặc `""`) = **bỏ** session cho tiến trình này, chuyển sang username-only; giá trị đang lưu trong `.env`/Render vẫn còn và lần restart sau sẽ dùng lại.
   - Nhập session mà thiếu `targetIdc` → 422.
-- Trang `/host` local có nút **Đổi kênh trên Render** (panel LIVE): trình duyệt gọi local `/host/action` → local gọi Render bằng `BRIDGE_MIRROR_URL` + ingest key. Nhờ vậy khóa không bao giờ xuống trình duyệt và không cần mở Render dashboard.
+- Trang `/host` local có nút **Đổi kênh trên Render** (panel LIVE) và ô tick **Bỏ session trên Render (chỉ dùng username)**: trình duyệt gọi local `/host/action` → local gọi Render bằng `BRIDGE_MIRROR_URL` + ingest key. Nhờ vậy khóa không bao giờ xuống trình duyệt và không cần mở Render dashboard. Bỏ trống ô session (không tick) vẫn là "giữ session hiện tại".
 
-## Hosting khi bạn muốn công khai
 
-Chưa triển khai. Cần phê duyệt trước. Phương án phù hợp với giới hạn Roblox:
+## Hosting (Render)
 
-1. Một máy ảo nhỏ chạy bridge ở `127.0.0.1`.
-2. Caddy hoặc Cloudflare Tunnel cấp URL `https://` công khai và chuyển tiếp về process đó.
-3. Điền URL đó vào attribute `BridgeBaseUrl`. Không đưa `http://127.0.0.1` vào game.
+Đã triển khai bản 1.4.0 trên Render Free: `https://python-bridge-6v9w.onrender.com` (health,
+batch, ack và `/v1/tiktok` đều đã kiểm). Render Free không có disk và tự ngủ khi rảnh; biến môi
+trường và quy trình deploy ở `RENDER_DEPLOY.md`. Nếu chuyển sang máy khác: chạy bridge ở
+`127.0.0.1`, cho Caddy/Cloudflare Tunnel cấp URL `https://` công khai, rồi điền URL đó vào
+`BridgeBaseUrl`. Không dùng localhost làm endpoint của Roblox server.
 
-Không dùng localhost làm endpoint của Roblox server.
+## Dọn dẹp 2026-11-17
+
+Đã xóa 23 thư mục `pip-*`, thư mục tạm `tmp6r4udwgr`, `.pytest_cache`, mọi `__pycache__`,
+`.venv` hỏng (tạo trên máy cũ) và `.venv313` trùng, rồi dựng lại một `.venv` chuẩn. Output Phase
+9F/9G/9H, gói `FishingLive_Render_Ready` (bản 1.0.0) và vài ghi chú cũ đã chuyển sang
+`../_cleanup_20261117/` — danh sách đầy đủ và cách khôi phục ở
+`../_cleanup_20261117/MANIFEST.md`. Sau khi dọn: 42 test qua, `/v1/health` = `1.4.0`,
+`POST /host/action {"action":"live_tiktok_status"}` chạy được trên bridge mock cục bộ.

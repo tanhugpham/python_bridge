@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import importlib.metadata as metadata
 import importlib.util
 import json
@@ -26,6 +27,7 @@ from fishinglive_bridge.queue_store import EventQueue
 from fishinglive_bridge.redact import RedactingFormatter
 from fishinglive_bridge.samples import interaction_batch, join_batch
 from fishinglive_bridge.schema import parse_event
+from fishinglive_bridge.tiktok_source import OFFLINE_SKIP_LIMIT, TikTokSource, error_code
 
 
 INGEST = "ingest-key-0123456789"
@@ -1374,28 +1376,38 @@ class FakeLive:
     """Minimal stand-in for TikTokSource; records the switch without a network call."""
 
     def __init__(self) -> None:
-        self.calls: list[tuple[str, str, str]] = []
+        self.calls: list[tuple[str, str | None, str | None]] = []
         self.state = {
             "username": "old_host",
             "connected": False,
             "lastError": "",
             "switches": 0,
             "hasSession": False,
+            "sessionMode": "username-only",
+            "envHasSession": False,
             "updatedAt": 0.0,
         }
 
     def status(self) -> dict:
         return dict(self.state)
 
-    def apply(self, username: str, session_id: str = "", target_idc: str = "") -> dict:
+    def apply(self, username: str, session_id: str | None = None, target_idc: str | None = None) -> dict:
+        """Mirror TikTokSource.apply: None keeps the session, "" clears it."""
         if not username:
             raise ValueError("invalid_username")
+        if session_id and not target_idc:
+            raise ValueError("target_idc_required")
         self.calls.append((username, session_id, target_idc))
+        if session_id is None:
+            keep = bool(self.state["hasSession"])
+        else:
+            keep = bool(session_id)
         self.state = {
             **self.state,
             "username": username,
             "switches": self.state["switches"] + 1,
-            "hasSession": bool(session_id),
+            "hasSession": keep,
+            "sessionMode": "authenticated" if keep else "username-only",
         }
         return dict(self.state)
 
@@ -1439,6 +1451,49 @@ class LiveSwitchTests(unittest.TestCase):
             self.assertFalse(mock_status["live"])
             self.assertEqual(mock_status["mode"], "mock")
 
+    def test_switch_can_drop_the_session_without_losing_the_stored_one(self) -> None:
+        """Absent keeps the credential, an explicit null drops it for this process."""
+        auth = {"X-Bridge-Key": INGEST}
+        with tempfile.TemporaryDirectory() as folder:
+            cfg = replace(
+                settings(Path(folder) / "queue.json"),
+                mode="live",
+                tiktok_username="old_host",
+                session_id="stored-session",
+                target_idc="useast5",
+            )
+            fake = FakeLive()
+            fake.state = {
+                **fake.state,
+                "hasSession": True,
+                "sessionMode": "authenticated",
+                "envHasSession": True,
+            }
+            live = TestClient(create_app(cfg, EventQueue(), live=fake))
+            kept = live.post("/v1/tiktok/switch", headers=auth, json={"username": "new_host"}).json()
+            self.assertTrue(kept["hasSession"])
+            self.assertEqual(fake.calls[-1], ("new_host", None, None))
+            cleared = live.post(
+                "/v1/tiktok/switch", headers=auth, json={"username": "new_host", "sessionId": None}
+            ).json()
+            self.assertFalse(cleared["hasSession"])
+            self.assertEqual(cleared["sessionMode"], "username-only")
+            self.assertEqual(fake.calls[-1], ("new_host", "", None))
+            # The stored credential is parked, not deleted: a restart restores it.
+            self.assertTrue(cleared["envHasSession"])
+            self.assertNotIn("stored-session", json.dumps(cleared))
+            idc_only = live.post(
+                "/v1/tiktok/switch", headers=auth, json={"username": "new_host", "targetIdc": "sea1"}
+            )
+            self.assertEqual(idc_only.status_code, 200)
+            self.assertEqual(fake.calls[-1], ("new_host", None, "sea1"))
+            self.assertEqual(
+                live.post(
+                    "/v1/tiktok/switch", headers=auth, json={"username": "new_host", "sessionId": 7}
+                ).status_code,
+                422,
+            )
+
     def test_host_proxy_validates_and_needs_a_mirror(self) -> None:
         page = Path(__file__).resolve().parents[1] / "host-controller"
         with tempfile.TemporaryDirectory() as folder:
@@ -1477,6 +1532,136 @@ class LiveSwitchTests(unittest.TestCase):
             self.assertFalse(status["ok"])
             self.assertEqual(status["error"], "remote")
 
+
+
+class TikTokSourceTests(unittest.TestCase):
+    """Connector state and switch rules. No socket is opened and no room is resolved."""
+
+    def source(self, **overrides) -> TikTokSource:
+        cfg = replace(settings(Path("queue.json")), mode="live", tiktok_username="surakun0zh", **overrides)
+        return TikTokSource(cfg, lambda event: ("created", 1))
+
+    def test_username_only_is_the_default_state(self) -> None:
+        status = self.source().status()
+        self.assertEqual(status["username"], "surakun0zh")
+        self.assertEqual(status["sessionMode"], "username-only")
+        self.assertFalse(status["hasSession"])
+        self.assertFalse(status["connected"])
+        self.assertFalse(status["offline"])
+        self.assertEqual(status["lastError"], "")
+        self.assertEqual((status["attempts"], status["connects"], status["switches"]), (0, 0, 0))
+        # Nothing secret-shaped is ever returned to the caller or the panel.
+        self.assertNotIn("sessionId", status)
+        self.assertNotIn("session_id", status)
+
+    def test_switch_keeps_then_clears_the_session(self) -> None:
+        source = self.source(session_id="stored", target_idc="useast5")
+        self.assertTrue(source.status()["envHasSession"])
+        kept = source.apply("surakun0zh")
+        self.assertEqual((kept["sessionMode"], kept["hasSession"]), ("authenticated", True))
+        cleared = source.apply("surakun0zh", "")
+        self.assertEqual((cleared["sessionMode"], cleared["hasSession"]), ("username-only", False))
+        # Parked, not deleted: the environment still holds the credential.
+        self.assertTrue(cleared["envHasSession"])
+        self.assertEqual(cleared["switches"], 2)
+        with self.assertRaises(ValueError):
+            source.apply("surakun0zh", "new-session")
+        with self.assertRaises(ValueError):
+            source.apply("a b")
+        self.assertEqual(source.status()["switches"], 2)
+
+    def test_switching_the_handle_forgets_the_cached_room(self) -> None:
+        source = self.source()
+        source.room_id = 7412345678
+        self.assertEqual(source.apply("surakun0zh")["roomId"], 7412345678)
+        self.assertEqual(source.apply("another_host")["roomId"], 0)
+
+    def test_room_id_can_come_from_the_environment(self) -> None:
+        source = self.source(tiktok_room_id=7412345678)
+        self.assertEqual(source.status()["roomId"], 7412345678)
+        env = {"BRIDGE_MODE": "mock", "BRIDGE_INGEST_KEY": INGEST, "BRIDGE_READ_KEY": READ}
+        with patch.dict(os.environ, {**env, "TIKTOK_ROOM_ID": "7412345678"}, clear=True):
+            self.assertEqual(load_settings(Path("does-not-exist.env")).tiktok_room_id, 7412345678)
+        with patch.dict(os.environ, env, clear=True):
+            self.assertEqual(load_settings(Path("does-not-exist.env")).tiktok_room_id, 0)
+        with patch.dict(os.environ, {**env, "TIKTOK_ROOM_ID": "room-seven"}, clear=True):
+            with self.assertRaises(RuntimeError):
+                load_settings(Path("does-not-exist.env"))
+
+    def test_preflight_reports_offline_without_opening_a_socket(self) -> None:
+        source = self.source(tiktok_room_id=7412345678)
+        calls: list[int] = []
+
+        class Web:
+            async def fetch_is_live(self, room_id: int | None = None) -> bool:
+                calls.append(int(room_id or 0))
+                return False
+
+        class Client:
+            web = Web()
+
+            async def is_live(self) -> bool:  # pragma: no cover - must not be called
+                raise AssertionError("a cached room id must be used instead of the handle")
+
+        self.assertIs(asyncio.run(source._preflight(Client())), False)
+        self.assertEqual(calls, [7412345678])
+        status = source.status()
+        self.assertEqual(status["lastError"], "UserOfflineError")
+        # Off air is a normal state, so the panel shows it as such.
+        self.assertTrue(status["offline"])
+        self.assertFalse(status["connected"])
+        # The HTTP answer costs nothing, so the backoff stays gentle.
+        self.assertGreaterEqual(OFFLINE_SKIP_LIMIT, 1)
+
+    def test_connect_and_disconnect_only_track_state(self) -> None:
+        published: list[dict] = []
+        source = self.source()
+        source.publish = published.append  # type: ignore[assignment]
+
+        class Event:
+            room_id = 7412345678
+
+        asyncio.run(source._on_connect(Event()))
+        asyncio.run(source._on_disconnect(Event()))
+        # The Roblox schema carries only comment/like/gift/follow: no new event type.
+        self.assertEqual(published, [])
+        status = source.status()
+        self.assertEqual(status["connects"], 1)
+        self.assertEqual(status["roomId"], 7412345678)
+        self.assertFalse(status["connected"])
+
+    @unittest.skipUnless(HAS_TIKTOKLIVE, "TikTokLive is not installed")
+    def test_open_is_username_only_and_refuses_outbound_chat(self) -> None:
+        source = self.source(session_id="stored", target_idc="useast5")
+        source.apply("surakun0zh", "")
+        client = source._open()
+        self.assertEqual(client.unique_id, "surakun0zh")
+        # No cookie and no login flag: TikTok sees an anonymous viewer, and the sign
+        # server is never handed a broadcaster session.
+        self.assertFalse(client.web.cookies.get("sessionid"))
+        self.assertEqual(client.web.params.get("user_is_login"), "false")
+        self.assertIs(source.client, client)
+        with self.assertRaises(RuntimeError):
+            client.send_room_chat("hello")
+
+    def test_unknown_errors_keep_their_own_name(self) -> None:
+        self.assertEqual(error_code(RuntimeError("boom")), "RuntimeError")
+        self.assertEqual(error_code(json.JSONDecodeError("bad", "<html>", 0)), "JSONDecodeError")
+
+    @unittest.skipUnless(HAS_TIKTOKLIVE, "TikTokLive is not installed")
+    def test_upstream_errors_map_to_their_own_codes(self) -> None:
+        from TikTokLive.client.errors import (
+            AuthenticatedWebSocketConnectionError,
+            UserOfflineError,
+            UserNotFoundError,
+        )
+
+        self.assertEqual(error_code(UserOfflineError("off air")), "UserOfflineError")
+        self.assertEqual(error_code(UserNotFoundError("missing")), "UserNotFoundError")
+        self.assertEqual(
+            error_code(AuthenticatedWebSocketConnectionError("rejected")),
+            "AuthenticatedWebSocketConnectionError",
+        )
 
 
 def logging_record(message: str):

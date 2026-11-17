@@ -961,19 +961,24 @@ class HostState:
         target_idc = target_idc.strip()
         if session_id and not target_idc:
             return self._fail("invalid", "Cần Target IDC khi nhập session TikTok.")
-        status, payload = self._public_call(
-            "POST",
-            "/v1/tiktok/switch",
-            {"username": username, "sessionId": session_id, "targetIdc": target_idc},
-        )
-        if status == 200 and payload.get("ok"):
+        # A blank field means "keep what the bridge is already using", which is how the
+        # panel has always behaved. Only an explicit tick clears the session, and even
+        # then the value parked in the Render environment is left untouched.
+        payload: dict[str, Any] = {"username": username}
+        if session_id:
+            payload["sessionId"] = session_id
+            payload["targetIdc"] = target_idc
+        elif bool(body.get("clearSession")):
+            payload["sessionId"] = None
+        status, reply = self._public_call("POST", "/v1/tiktok/switch", payload)
+        if status == 200 and reply.get("ok"):
             return self._result(
                 "ACCEPTED_BY_BRIDGE",
                 "NOT_DELIVERED",
                 None,
                 "",
                 f"Đã chuyển kênh TikTok sang @{username}. Listener trên Render sẽ kết nối lại.",
-                extra={"tiktok": payload},
+                extra={"tiktok": reply},
             )
         if status == 409:
             detail = "Bridge công khai đang chạy MOCK. Cần BRIDGE_MODE=live trên Render để đổi kênh."
@@ -982,7 +987,7 @@ class HostState:
         elif status == 0:
             detail = "Không gọi được bridge công khai (kiểm tra BRIDGE_MIRROR_URL / Render đang ngủ)."
         else:
-            detail = "Bridge công khai từ chối: " + str(payload.get("detail") or status)
+            detail = "Bridge công khai từ chối: " + str(reply.get("detail") or status)
         return self._fail("remote", detail)
 
     def remote_tiktok_status(self) -> dict[str, Any]:

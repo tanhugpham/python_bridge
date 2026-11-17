@@ -93,6 +93,10 @@ class Settings:
     outbox_ttl: float = 1800.0
     # Draft saved by the host page. Applied only when BRIDGE_SAVED_SETTINGS=1.
     live_settings_path: str = LIVE_SETTINGS_DEFAULT
+    # Optional room id override. Passed straight to TikTokLiveClient.start(), which
+    # then skips the HTML room scrape (the step TikTok answers with HTML when it
+    # rate-limits). 0 means "resolve the room once through the client".
+    tiktok_room_id: int = 0
 
     @property
     def live(self) -> bool:
@@ -145,6 +149,9 @@ def load_settings(env_file: Path | None = None) -> Settings:
         mirror_key = mirror_key or ingest_key
         if len(mirror_key) < 16:
             raise RuntimeError("BRIDGE_MIRROR_INGEST_KEY is missing")
+    room_id_raw = os.environ.get("TIKTOK_ROOM_ID", "").strip()
+    if room_id_raw and not room_id_raw.isdigit():
+        raise RuntimeError("TIKTOK_ROOM_ID must be a numeric room id")
     settings = Settings(
         mode=mode,
         host=host,
@@ -157,6 +164,7 @@ def load_settings(env_file: Path | None = None) -> Settings:
         tiktok_username=username,
         session_id=os.environ.get("TIKTOK_SESSION_ID", "").strip(),
         target_idc=os.environ.get("TIKTOK_TARGET_IDC", "").strip(),
+        tiktok_room_id=int(room_id_raw or 0),
         mirror_url=mirror_url,
         mirror_key=mirror_key,
         journal_path=os.environ.get("BRIDGE_JOURNAL_PATH", "data/queue-journal.sqlite3").strip(),

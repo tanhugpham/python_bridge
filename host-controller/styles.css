@@ -30,6 +30,19 @@ button.primary { background: var(--teal-deep); border-color: var(--teal); }
 button.gold { background: #5c4816; border-color: var(--gold); color: var(--gold); }
 button.danger { background: #5a2424; border-color: var(--red); color: #ffd0d0; }
 button.on { border-color: var(--teal); color: var(--teal); }
+/* The one checkbox on the LIVE card: an explicit "drop the session" opt-in, so a
+   blank session field keeps meaning "leave the bridge's current session alone". */
+label.toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 10px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--ink);
+  cursor: pointer;
+}
+label.toggle input { accent-color: var(--gold); }
 .app { display: grid; grid-template-columns: 220px 1fr; min-height: 100vh; }
 .side { background: var(--side); border-right: 1px solid var(--line); padding: 16px 12px; }
 .brand strong { display: block; letter-spacing: 0.08em; color: var(--teal); }

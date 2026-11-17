@@ -109,14 +109,19 @@
       node.innerHTML = statusRow("TIKTOK LIVE", "KHÔNG ĐỌC ĐƯỢC", t.note || "Bridge công khai không trả lời.", "bad");
       return;
     }
-    var state = t.connected ? "ĐANG KẾT NỐI" : "CHƯA KẾT NỐI";
+    var state = t.connected ? "ĐANG KẾT NỐI" : (t.offline ? "CHƯA LIVE" : "CHƯA KẾT NỐI");
+    var mode = t.sessionMode || (t.hasSession ? "authenticated" : "username-only");
+    // Username-only with a parked credential is the safe default after a switch, so
+    // the panel says so instead of showing the stored session as if it were in use.
+    var parked = t.envHasSession && mode === "username-only" ? " (đã tạm ẩn)" : "";
     node.innerHTML =
       statusRow("TIKTOK LIVE", state,
-        "@" + (t.username || "?") + " · session " + (t.hasSession ? "CÓ" : "KHÔNG") + " · đổi kênh " + (t.switches || 0),
+        "@" + (t.username || "?") + " · session " + mode + parked + " · đổi kênh " + (t.switches || 0) +
+          (t.roomId ? " · room " + t.roomId : ""),
         t.connected ? "ok" : "warn") +
       statusRow("LỖI GẦN NHẤT", t.lastError || "—",
         t.updatedAt ? new Date(t.updatedAt * 1000).toLocaleTimeString() : "",
-        t.lastError ? "bad" : "ok");
+        t.lastError && !t.offline ? "bad" : "ok");
   }
 
   function download(name, text, type) {
@@ -928,14 +933,19 @@
       });
     });
     $("live-apply").addEventListener("click", function () {
-      post("live_switch_tiktok", {
+      var payload = {
         tiktokUsername: $("live-username").value,
         sessionId: $("live-session").value,
         targetIdc: $("live-idc").value
-      }).then(function (data) {
+      };
+      // An unticked box and a blank session field both mean "keep the session the
+      // Render bridge already uses"; only the tick asks the bridge to drop it.
+      if ($("live-clear-session").checked) payload.clearSession = true;
+      post("live_switch_tiktok", payload).then(function (data) {
         showResult($("live-feedback"), data);
         if (data.ok !== false) {
           $("live-session").value = "";
+          $("live-clear-session").checked = false;
           if (data.tiktok) paintTiktokStatus(data.tiktok);
         }
       });
